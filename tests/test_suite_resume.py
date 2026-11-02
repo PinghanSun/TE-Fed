@@ -26,7 +26,7 @@ class SuiteResumeTests(unittest.TestCase):
         return config
 
     def checkpoint(self, config, output, *, completed=True, next_round=None):
-        """Write a real round snapshot without running detector training."""
+        """Write a round snapshot for suite recovery tests."""
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
         rounds = config['experiment']['rounds']
@@ -219,7 +219,7 @@ class SuiteResumeTests(unittest.TestCase):
             config['decision']['render_budget'] = 1
             with patch('tefed.resume.run_binding', wraps=run_binding) as measured:
                 manifest = suite.make_manifest(config, 'comparisons', root / 'comparisons')
-                self.assertEqual(len(manifest['jobs']), 110)
+                self.assertEqual(len(manifest['jobs']), 120)
                 self.assertEqual(measured.call_count, 2)
             for path in (scene, script):
                 self.assertIn(str(path), manifest['binding']['input_files'])

@@ -1,4 +1,4 @@
-"""Export linked run evidence and figures from explicitly supplied observations."""
+"""Export run reports and figures."""
 from __future__ import annotations
 
 from collections import Counter
@@ -462,7 +462,7 @@ COLORS=('#165d9c','#d16728','#32865c','#8b55a5','#ad3946','#617284')
 
 
 def _svg_lines(path, title, series, *, y_label):
-    """Draw explicit numeric series; each series retains its measured x positions."""
+    """Draw recorded series at their original x positions."""
     points=[point for item in series for point in item['points']]
     if not points:
         raise ValueError(f'No measured points for {title}')
@@ -484,7 +484,11 @@ def _svg_lines(path, title, series, *, y_label):
     for i in range(6):
         value=ymin+(ymax-ymin)*i/5; _,y=xy(xmin,value)
         content.append(f'<text x="72" y="{y+4:.2f}" text-anchor="end" font-family="sans-serif" font-size="11">{value:.4g}</text>')
-    for value in sorted({x for x,_ in points}):
+    rounds=sorted({x for x,_ in points})
+    # Connect all points; limit axis ticks.
+    tick_rounds={rounds[round(i*(len(rounds)-1)/min(6,len(rounds)-1))]
+                 for i in range(min(7,len(rounds)))} if len(rounds)>1 else set(rounds)
+    for value in sorted(tick_rounds):
         x,_=xy(value,ymin)
         content.append(f'<text x="{x:.2f}" y="409" text-anchor="middle" font-family="sans-serif" font-size="11">{value:g}</text>')
     for i,item in enumerate(series):
@@ -492,6 +496,8 @@ def _svg_lines(path, title, series, *, y_label):
         coords=' '.join(f'{xy(x,y)[0]:.2f},{xy(x,y)[1]:.2f}' for x,y in item['points'])
         content.append(f'<polyline points="{coords}" stroke="{color}" stroke-width="2" fill="none"/>')
         for x,y in item['points']:
+            if x not in tick_rounds:
+                continue
             x,y=xy(x,y); content.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3" fill="{color}"/>')
         content.append(f'<text x="80" y="{460+i*22}" fill="{color}" font-family="sans-serif" font-size="12">{escape(item["label"])}</text>')
     content.append('</svg>'); path.write_text('\n'.join(content),encoding='utf-8')
@@ -531,7 +537,7 @@ def _svg_bars(path,title,rows):
 
 
 def plot_runs(runs, output, *, factorial_records=None, seeds=None):
-    """Plot actual per-client losses and seed metrics; no interpolated observations."""
+    """Plot per-client loss curves and seed metrics."""
     paths=[Path(run).expanduser().resolve() for run in runs]
     if not paths or len(set(paths))!=len(paths):
         raise ValueError('Supply distinct completed run directories')

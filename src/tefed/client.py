@@ -72,7 +72,10 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
     method = config['experiment'].get('method', 'tefed')
     policy = policy_dict(method, round_index, 0, config)
     persistent = deepcopy(persistent_state or {})
-    if set(persistent) - {'local_model', 'teacher', 'bn', 'new_client_model'}:
+    allowed = {'local_model', 'teacher', 'bn', 'new_client_model'}
+    if method == 'proxyfl':
+        allowed.add('proxy_prior')
+    if set(persistent) - allowed:
         raise ValueError('Unknown persistent client state')
     base = model.export_state()
     device = next(model.parameters()).device
@@ -120,9 +123,13 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
         raise ValueError('Client tasks require a source identifier key')
     for sample, assessment in zip(unlabeled, assessed):
         qualified = [candidate for candidate in assessment['candidates'] if candidate['disposition'] == 'qualified']
-        if qualified:
+        if method == 'proxyfl':
+            qualified = [candidate for candidate in qualified if candidate['score'] >= policy['proposal_floor']]
+        if qualified or method == 'proxyfl':
             pseudo = {**sample, 'targets': [{'box': candidate['box'], 'class_id': candidate['class_id']} for candidate in qualified]}
             items.append({'kind': 'pseudo', 'sample': pseudo, 'candidates': qualified})
+            if method == 'proxyfl':
+                items[-1]['proxy_candidates'] = assessment['candidates']
         identity = hmac.new(secret, str(sample['id']).encode('utf-8'), 'sha256').hexdigest()[:32]
         for candidate in assessment['candidates']:
             candidate_audit.append({'client_id':client_id,'round_index':round_index,'local_identity':identity,
@@ -147,7 +154,9 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
     if replay_control is not None:
         from .replay import validate_replay_before
         validate_replay_before(items, config, replay_control)
-    ledger = train_local(student, items, config, round_id=round_index, method=method, teacher=teacher, reference=model)
+    proxy_options = {'proxy_prior': persistent.get('proxy_prior')} if method == 'proxyfl' else {}
+    ledger = train_local(student, items, config, round_id=round_index, method=method,
+                         teacher=teacher, reference=model, **proxy_options)
     ledger['assessment_policy']=deepcopy(policy)
     dispositions=[candidate['disposition'] for assessment in assessed for candidate in assessment['candidates']]
     ledger['candidate_counts']={name:dispositions.count(name) for name in ('qualified','correction','suppressed')}
@@ -165,6 +174,8 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
         ledger['replay'] = validate_replay_after(ledger, replay_control)
     next_persistent = {'local_model': module_state(student) if method == 'local' else None,
                        'teacher': module_state(teacher) if teacher is not None else None, 'bn': None}
+    if method == 'proxyfl':
+        next_persistent['proxy_prior'] = deepcopy(persistent.get('proxy_prior'))
     if method == 'fedbn':
         keys = batchnorm_state_keys(student)
         next_persistent['bn'] = {key: value for key, value in module_state(student).items() if key in keys}

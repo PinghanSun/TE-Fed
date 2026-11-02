@@ -1,0 +1,80 @@
+# Experiments
+
+The main experiments used Tomato and DroneVehicle, with 300 rounds and five paired blocks per setting.
+
+## Paired blocks
+
+Run IDs are `0–4`. Methods within each block share its data partition and evaluation identities. Record one entry per block in `blocks.json`:
+
+```json
+{"schema_version":1,"blocks":[{"block_id":"0","seed":0,"partition_sha256":"<manifest SHA256>","evaluation_ids_sha256":"<evaluation IDs SHA256>"}]}
+```
+
+Use 64-character SHA256 values. The evaluation digest is `tefed.experiments.canonical_hash(sorted(ids))`, using the view IDs in `predictions/evaluation_manifest.json`. Analyze each setting, view, metric and checkpoint separately. `paired` supports different partitions across blocks; `summary` summarizes seeds sharing one partition.
+
+## Comparisons and ablations
+
+```bash
+uv run --locked --extra cpu python scripts/run_suite.py --config local.toml --plan comparisons --output runs/comparisons --execute
+```
+
+The comparison plan runs the 12 registered methods, including [ProxyFL](proxyfl.md). Omit `--execute` to validate and save the plan; use `--resume` to continue it. Other plans cover `mechanisms`, `budgets`, `components` and frozen-pool `replay`.
+
+Run the four effective conditions with:
+
+```bash
+uv run --locked --extra cpu python scripts/run_suite.py --config local.toml --plan conditions --output runs/conditions --execute
+```
+
+| Condition | Qualification A | Correction E | Implementation bits |
+| --- | --- | --- | --- |
+| A0E0 | Fixed posterior threshold | Off | A=0, B=C=0 |
+| A1E0 | Reliability qualification | Off | A=1, B=C=0 |
+| A0E1 | Fixed posterior threshold | On | A=0, B=C=1 |
+| A1E1 | Reliability qualification | On | A=1, B=C=1 |
+
+E switches B and C together. The eight-cell `factorial` plan provides the separate A/B/C analysis.
+
+```bash
+uv run --locked --extra cpu python scripts/analyze_runs.py conditions --records runs/conditions/conditions_hard_mAP50.jsonl --block-manifest blocks.json --blocks 0 1 2 3 4 --scale 100 --out runs/condition_effects.json
+```
+
+This computes conditional effects and `(A1E1−A0E1)−(A1E0−A0E0)` within blocks, followed by mean and sample SD across blocks.
+
+## Paired method results
+
+Prepare one JSONL row per method and block with `block_id`, `seed`, `method`, numeric `value`, `partition_sha256` and `evaluation_ids_sha256`. Include `view`, `metric`, `checkpoint_round` and `setting_id` to identify the analysis.
+
+```bash
+uv run --locked --extra cpu python scripts/analyze_runs.py paired --records scores.jsonl --block-manifest blocks.json --methods tefed proxyfl server_moe --reference tefed --blocks 0 1 2 3 4 --scale 100 --out runs/paired_results.json
+```
+
+Method scores retain their input scale. Differences are reference minus comparator, computed within blocks before aggregation. `--scale 100` converts differences from 0–1 AP to percentage points. Each declared method and block must occur exactly once.
+
+## Checkpoints and plots
+
+Set completed-round counts in the configuration:
+
+```toml
+[experiment]
+rounds = 1000
+save_rounds = [300, 500, 1000]
+```
+
+The primary 300-round configuration uses `save_rounds=[300]`. Checkpoints are written after aggregation, router and client-state updates, before the round commit. Evaluation checkpoints retain the model, router and client state summaries, plus Local-only models or FedBN statistics when applicable. `resume.pt` also retains training and aggregation state. Record the training schedule with each checkpoint.
+
+`evaluation.monitor_every=1` saves per-round AP in `monitoring/round_*/metrics.json`. `report_runs.py plots` reads training loss from `rounds.jsonl` and final scores from `metrics.json`; it produces loss curves, metric comparisons and optional factorial-effect plots. Loss lines connect all recorded points, with sparse markers. `plot_values.csv` contains the plotted values. `report_runs.py qualitative` draws image-level detection comparisons.
+
+## Additional settings
+
+Class-skew experiments use target label fractions of 10% and 25% with Dirichlet concentrations `0.1, 0.5, 1, 10`. Use the corresponding image-level manifests and configurations. The `components` plan defines loss/input ablations. Modality, robustness, client-scale and parameter-sensitivity experiments use separate manifests and TOML configurations.
+
+## Timing and resources
+
+| Analysis | Inputs and scope |
+| --- | --- |
+| Native inference time | `profile_inference.py`: synchronized image loading, preprocessing and routed inference; defaults are 20 warm-ups and 200 measured requests |
+| Resource accounting | Recorded workload totals and round boundaries |
+| Device energy | `record_power.py` plus `analyze_runs.py energy`: power samples and round boundaries |
+
+`analyze_runs.py latency` computes node-trace quantiles and the worst-client summary. Record the timing scope with each result.

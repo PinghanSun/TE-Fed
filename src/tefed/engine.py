@@ -22,7 +22,7 @@ from .state import initialize_state, update_state, state_specialist_probabilitie
 from .data import load_manifest, load_sample, apply_unseen
 from .model import RoutedYOLO, Router, sample_tensor, default_prototypes
 from .losses import WeightedNativeLoss, soft_consistency, contrastive_alignment
-from .rendering import BlenderRenderer
+from .rendering import BlenderRenderer, tomato_class_map
 from .diagnostics import renderer_target_observation
 from .resume import atomic_snapshot,load_snapshot,locked_run,run_binding,file_journal,reconcile_files
 
@@ -75,6 +75,12 @@ def validate_run_config(config):
         value = experiment.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f'experiment.{key} must be a positive integer')
+    save_rounds = experiment.get('save_rounds', [])
+    total_rounds = experiment.get('rounds', 30)
+    if (not isinstance(save_rounds, list)
+            or any(type(value) is not int or not 1 <= value <= total_rounds for value in save_rounds)
+            or save_rounds != sorted(set(save_rounds))):
+        raise ValueError('experiment.save_rounds must be a sorted list of distinct completed rounds within experiment.rounds')
     model = config.get('model', {})
     classes = model.get('classes', 2)
     if isinstance(classes, bool) or not isinstance(classes, int) or classes < 2:
@@ -102,9 +108,42 @@ def validate_manifest_config(config,manifest):
     names=manifest.metadata.get('class_names')
     if names is not None and len(names)!=classes:
         raise ValueError('model.classes must match manifest.class_names')
+    configured=config.get('model',{}).get('class_names')
+    if names is not None:
+        names=validate_class_names(names,classes,'manifest.class_names')
+        if configured is not None and validate_class_names(configured,classes,'model.class_names')!=names:
+            raise ValueError('model.class_names must match manifest.class_names in class-ID order')
+        config.setdefault('model',{})['class_names']=list(names)
+    elif configured is not None:
+        validate_class_names(configured,classes,'model.class_names')
+    if config.get('task','tomato')=='tomato' and config.get('renderer',{}).get('tomato_class_map') is not None:
+        tomato_class_map(config.get('model',{}).get('class_names'),config['renderer']['tomato_class_map'])
     for record in manifest.records:
         if any(label.class_id>=classes for label in record.labels):
             raise ValueError(f'Sample {record.id!r}: class_id must be below model.classes={classes}')
+
+
+def validate_class_names(names,classes,source='class_names'):
+    """Validate a class-ID ordered label list."""
+    if (not isinstance(names,list) or len(names)!=classes
+            or any(not isinstance(name,str) or not name.strip() for name in names)
+            or len(set(names))!=len(names)):
+        raise ValueError(f'{source} must contain {classes} unique nonempty names in class-ID order')
+    return list(names)
+
+
+def _check_evaluation_classes(model,manifest,config):
+    recorded=getattr(model,'config',{}).get('class_names')
+    if recorded is not None:
+        classes=config.get('model',{}).get('classes',2)
+        recorded=validate_class_names(recorded,classes,'checkpoint model.class_names')
+        declared=manifest.metadata.get('class_names')
+        configured=config.get('model',{}).get('class_names')
+        for value in (declared,configured):
+            if value is not None and validate_class_names(value,classes)!=recorded:
+                raise ValueError('Evaluation class_names differ from the checkpoint class-ID order')
+        config.setdefault('model',{})['class_names']=list(recorded)
+    validate_manifest_config(config,manifest)
 
 
 def seed_everything(seed):
@@ -357,7 +396,7 @@ def _head_weights(item,head):
     return [float(c['R'])*dict(zip(c['route'],c['weights'])).get(head,0.) for c in item['candidates']]
 
 
-def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,reference=None):
+def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,reference=None,proxy_prior=None):
     from .baselines import policy_dict,update_ema_teacher,fedsto_set_trainable,proximal_penalty,elastic_penalty,orthogonality_penalty
     policies=[policy_dict(method,round_id,epoch,config) for epoch in range(int(config['experiment'].get('local_epochs',2)))]
     device=next(model.parameters()).device
@@ -389,6 +428,10 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
             'presentations':{'labeled':0,'pseudo':0,'correction':0},'mean_step_loss':None,'learning_rate':lr,
             'baseline_policies':[],'teacher_updates':0,'stage_history':[]}
     step_losses=[];alignment_losses=[];consistency_losses=[];matched_consistency=0
+    if method == 'proxyfl':
+        ledger['proxyfl'] = {'batches': 0, 'proposal_count': 0, 'high_count': 0, 'low_count': 0,
+                              'anchor_count': 0, 'negative_pair_count': 0, 'class_counts': [0] * model.classes,
+                              'losses': [], 'class_count_scope': 'final local epoch; each region counted once per presentation'}
     if not items:
         return ledger
     for epoch,policy in enumerate(policies):
@@ -409,6 +452,9 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
             alignment_enabled=float(losses.get('rho',.1))>0 and not config['model'].get('detector_rgb_only',False) and not config['model'].get('disable_auxiliary',False)
             for item in batch:
                 sample=item['sample']; targets=sample['targets']
+                if method == 'proxyfl' and item['kind'] == 'pseudo' and not targets:
+                    # Uncertain regions enter ICPL; high-confidence proposals supply pseudo boxes.
+                    continue
                 active=[m for m in range(len(model.heads)) if any(w>0 for w in _head_weights(item,m))]
                 if item['kind']=='labeled' and not targets:
                     active=[m for m,w in item['route_weights'].items() if w>0]
@@ -460,6 +506,19 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
                     case_ids.add(case_id)
             auxiliary=[]
             with torch.amp.autocast('cuda',enabled=amp):
+                if method == 'proxyfl':
+                    from .proxyfl import proxy_objective
+                    proxy_loss, proxy_stats = proxy_objective(model, batch, config, proxy_prior,
+                        strong_view=_strong_view, round_id=round_id, epoch=epoch)
+                    tracked = ledger['proxyfl']
+                    tracked['batches'] += 1
+                    for key in ('proposal_count', 'high_count', 'low_count', 'anchor_count', 'negative_pair_count'):
+                        tracked[key] += int(proxy_stats[key])
+                    tracked['losses'].append(float(proxy_loss.detach()))
+                    if epoch == len(policies) - 1:
+                        tracked['class_counts'] = [left + right for left, right in
+                            zip(tracked['class_counts'], proxy_stats['class_counts'])]
+                    auxiliary.append(float(policy['proxy_weight']) * proxy_loss)
                 if alignment_enabled and contrastive_samples:
                     embeddings,availability=_crop_embeddings(model,contrastive_inputs,contrastive_samples)
                     if embeddings is not None:
@@ -532,11 +591,45 @@ def save_checkpoint(path,model,router,config,states,pool,round_index):
     write_json(path.with_suffix('.pool.json'),pool)
 
 
+def _saved_checkpoint_bundle(model,manifest,config,local_models,bn_cache,*,remote=False):
+    """Include the client model or BN state needed for frozen checkpoint evaluation."""
+    method=config['experiment'].get('method','tefed')
+    if method=='fedbn':
+        return {'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache}
+    if method!='local':
+        return {}
+    records=[manifest.by_id[uid] for uid in manifest.calibration_ids]
+    if not records or not local_models:
+        raise ValueError('Local-only checkpoint selection requires calibration records and client models')
+    if remote and any(str(record.client_id)!='server' for record in records):
+        raise ValueError('Remote Local-only selection requires independent server calibration records')
+    original=deepcopy(model.state_dict());losses={}
+    try:
+        for client,values in local_models.items():
+            model.load_state_dict(values,strict=True)
+            losses[client]=validation_loss(model,records,config)
+    finally:
+        model.load_state_dict(original,strict=True)
+    chosen=min(losses,key=lambda client:(losses[client],client))
+    return {'checkpoint_kind':'local_bundle','client_models':local_models,
+            'local_new_client_id':chosen,
+            'local_model_selection':{'protocol':'minimum server calibration loss; fixed before evaluation',
+                                     'losses':losses,'selected_client':chosen}}
+
+
 def load_checkpoint(path,config=None,device='cpu'):
     checkpoint=torch.load(path,map_location=device,weights_only=True)
     if checkpoint.get('model_schema_version')!=RoutedYOLO.schema_version:
         raise ValueError('Checkpoint model schema is incompatible; regenerate it with the current pretrain command')
-    cfg=checkpoint['config'] if config is None else config
+    cfg=deepcopy(checkpoint['config'] if config is None else config)
+    recorded=checkpoint['config'].get('model',{}).get('class_names')
+    if recorded is not None:
+        count=checkpoint['config']['model'].get('classes',2)
+        recorded=validate_class_names(recorded,count,'checkpoint model.class_names')
+        configured=cfg.get('model',{}).get('class_names')
+        if configured is not None and validate_class_names(configured,count,'model.class_names')!=recorded:
+            raise ValueError('Configured class_names differ from the checkpoint class-ID order')
+        cfg['model']['class_names']=recorded
     construction=deepcopy(cfg)
     construction['model']['weights']=''
     model=RoutedYOLO(construction).to(device)
@@ -551,6 +644,13 @@ def inherit_initial(model,path):
     checkpoint=torch.load(path,map_location='cpu',weights_only=True)
     if checkpoint.get('model_schema_version')!=model.schema_version:
         raise ValueError('Initial checkpoint model schema is incompatible; regenerate it with the current pretrain command')
+    current_names=getattr(model,'config',{}).get('class_names')
+    initial_config=checkpoint.get('config',{}).get('model',{})
+    initial_names=initial_config.get('class_names')
+    if current_names is not None and initial_names is not None:
+        validate_class_names(initial_names,initial_config.get('classes',len(initial_names)),'initial checkpoint class_names')
+        if current_names!=initial_names:
+            raise ValueError('Initial checkpoint class_names differ from the training class-ID order')
     current=model.state_dict()
     weights=checkpoint['model']
     compatible={k:v for k,v in weights.items() if k in current and current[k].shape==v.shape}
@@ -602,6 +702,7 @@ def _independent_selection(pool,round_index,count):
 
 @torch.no_grad()
 def evaluate_model(model,router,manifest,states,calibration,config,output_dir,*,client_models=None,client_bn=None,local_new_client_id=None):
+    _check_evaluation_classes(model,manifest,config)
     from .metrics import evaluate_detection
     from .evaluation_manifest import evaluation_record,build_evaluation_manifest
     output_dir=Path(output_dir); output_dir.mkdir(parents=True,exist_ok=True)
@@ -705,6 +806,7 @@ def evaluate_current_models(model,router,manifest,states,calibration,config,outp
 def evaluate_remote_models(model,router,manifest,states,calibration,config,output_dir,executor,*,
                            client_runtime=None,client_models=None,client_bn=None,local_new_client_id=None):
     """Pool authenticated worker predictions under the declared view identities."""
+    _check_evaluation_classes(model,manifest,config)
     from .metrics import evaluate_detection
     from .evaluation_manifest import build_evaluation_manifest,validate_records
     directory=Path(output_dir)
@@ -800,6 +902,8 @@ def validate_renderer_setup(config,policy):
     renderer=config.get('renderer',{})
     if not policy['use_corrections'] or not renderer.get('enabled',True) or config.get('decision',{}).get('render_budget',1152)<=0:
         return
+    if config.get('task','tomato')=='tomato' and renderer.get('scene_class_map') is None:
+        tomato_class_map(config.get('model',{}).get('class_names'),renderer.get('tomato_class_map'))
     backend=BlenderRenderer(renderer.get('blender','blender'),renderer.get('scene'),
                             timeout=float(renderer.get('timeout',600)),samples=int(renderer.get('samples',8)),
                             script_path=renderer.get('script_path'))
@@ -816,6 +920,20 @@ def validate_renderer_setup(config,policy):
 
 
 def _validate_aggregation_state(state,policy,clients,next_round,history):
+    if policy['aggregation'] == 'proxyfl':
+        if next_round == 0:
+            if state is not None:
+                raise ValueError('Initial ProxyFL aggregation state must be empty')
+            return
+        if not isinstance(state,dict) or set(state) != {'client_ids','class_prior'} or state['client_ids'] != clients:
+            raise ValueError('ProxyFL aggregation state client ordering differs')
+        prior = state['class_prior']
+        if not isinstance(prior,list) or len(prior) < 2 or any(isinstance(x,bool) or not isinstance(x,(int,float))
+                or not math.isfinite(x) or not 0 <= x <= 1 for x in prior) or not math.isclose(sum(prior),1.,abs_tol=1e-7):
+            raise ValueError('ProxyFL class prior is invalid')
+        if history[-1].get('aggregation',{}).get('class_prior') != prior:
+            raise ValueError('ProxyFL class prior differs from the committed ledger')
+        return
     if policy['aggregation']!='fedawa_paper':
         if state is not None:
             raise ValueError('Unexpected persistent aggregation state')
@@ -1023,8 +1141,13 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
                 raise AssertionError('Same-round correction reuse is forbidden')
             ledger['reuse_selected_ids'][client]=[h['id'] for h in selected]
             ledger['selected_creation_rounds'][client]=[h['round'] for h in selected]
+            runtime = client_runtime.get(client)
+            if method == 'proxyfl':
+                runtime = deepcopy(runtime or {})
+                runtime['proxy_prior'] = aggregation_state['class_prior'] if aggregation_state is not None \
+                    else [1. / cfg['model']['classes']] * cfg['model']['classes']
             result=client_task('client_round',client,round_index=t,state=state,selected_cases=selected,
-                               persistent_state=client_runtime.get(client),replay_control=replay_control)
+                               persistent_state=runtime,replay_control=replay_control)
             client_runtime[client]=result['persistent_state']
             for name,cache in (('local_model',local_models),('bn',bn_cache)):
                 value=result['persistent_state'].get(name)
@@ -1085,6 +1208,25 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
             keep=batchnorm_state_keys(model) if method=='fedbn' else set()
             aggregate=sample_weighted_aggregate(trained_states,weights,previous=base,keep_predicate=lambda key:key in keep)
             model.import_state(aggregate)
+            if policy['aggregation'] == 'proxyfl':
+                from .proxyfl import optimize_global_proxies
+                settings = cfg.get('baselines',{}).get('proxyfl',{})
+                tuning = optimize_global_proxies(model,trained_states,
+                    steps=int(settings.get('server_steps',10)),
+                    learning_rate=float(settings.get('server_learning_rate',.005)))
+                counts = np.asarray([ledger['clients'][client]['proxyfl']['class_counts'] for client in clients],dtype=float)
+                if counts.shape != (len(clients),cfg['model']['classes']) or not np.isfinite(counts).all() or np.any(counts < 0):
+                    raise ValueError('ProxyFL class counts differ from the declared clients and classes')
+                previous = np.asarray(aggregation_state['class_prior'] if aggregation_state is not None \
+                    else [1. / cfg['model']['classes']] * cfg['model']['classes'],dtype=float)
+                distribution = counts.sum(axis=0)
+                distribution = distribution / distribution.sum() if distribution.sum() > 0 else previous
+                momentum = float(settings.get('prior_momentum',.99))
+                prior = momentum * previous + (1. - momentum) * distribution
+                prior = (prior / prior.sum()).tolist()
+                aggregation_state = {'client_ids':list(clients),'class_prior':prior}
+                aggregation_details.update(proxy_tuning=tuning,class_prior=prior,
+                    class_counts=counts.sum(axis=0).tolist(),prior_momentum=momentum)
             normalized=np.asarray(weights,dtype=np.float64);normalized=normalized/normalized.sum()
             ledger['aggregation']={**aggregation_details,'baseline_policy':deepcopy(policy),
                                    'weights':dict(zip(clients,normalized.tolist()))}
@@ -1104,6 +1246,14 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
             monitoring,_=evaluate_run(out/f'monitoring/round_{t:03d}')
             append_jsonl(out/'monitoring.jsonl',{'round_index':t,'metrics':monitoring})
             ledger['monitoring_seconds']=time.perf_counter()-monitor_start
+        if t+1 in cfg['experiment'].get('save_rounds',[]):
+            checkpoint_path=out/'checkpoints'/f'round_{t+1:06d}.pt'
+            save_checkpoint(checkpoint_path,model,router,cfg,states,pool,t)
+            extra=_saved_checkpoint_bundle(model,manifest,cfg,local_models,bn_cache,remote=remote_mode)
+            if extra:
+                payload=torch.load(checkpoint_path,map_location='cpu',weights_only=True)
+                payload.update(extra)
+                atomic_snapshot(checkpoint_path,payload)
         append_jsonl(out/'rounds.jsonl',ledger)
         history.append(ledger)
         commit(t+1)
@@ -1126,5 +1276,7 @@ def pretrain(config,seed=0,output_dir=None,resume=None):
     """Prepare a shared detector with supervised FedAvg on local labels."""
     cfg=deepcopy(config)
     cfg['experiment']['method']='fedavg'
+    # Pretraining uses a separate checkpoint schedule.
+    cfg['experiment'].pop('save_rounds',None)
     cfg['model']['specialists']=0
     return run_experiment(cfg,seed=seed,output_dir=output_dir,labels_only=True,resume=resume)

@@ -9,6 +9,11 @@ on:
         type: boolean
         default: false
         required: false
+      run_docker:
+        description: Build the CPU image and run its bundled input preview
+        type: boolean
+        default: false
+        required: false
 permissions:
   contents: read
 jobs:
@@ -29,8 +34,10 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked python -m tefed --help
       - run: uv run --locked python -m tefed methods
-      - run: uv run --locked python -m unittest tests.test_trimodal_preview -v
+      - run: uv run --locked python -m unittest tests.test_trimodal_preview tests.test_packaging -v
       - run: uv run --locked python -m tefed preview --example examples/tomato_trimodal --output runs/tomato_preview
+      - run: uv build --wheel --out-dir dist
+      - run: uv run --locked python scripts/check_wheel.py --dist dist
   cpu:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_full_tests }}
     needs: source
@@ -49,3 +56,12 @@ jobs:
       - run: uv sync --locked --extra cpu
       - run: uv run --locked --extra cpu python -m tefed.main --help
       - run: uv run --locked --extra cpu python -m unittest discover -s tests -t . -v
+  docker:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_docker }}
+    needs: source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t tefed:ci .
+      - run: docker run --rm tefed:ci --help
+      - run: docker run --rm tefed:ci preview --example examples/tomato_trimodal --output /tmp/tomato_preview

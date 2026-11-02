@@ -159,6 +159,45 @@ class SingleInferenceTests(unittest.TestCase):
         self.assertEqual(saved['round_id'], 7)
         self.assertEqual(saved['class_names'], {'0': 'supplied_class'})
 
+    def test_utf8_bom_calibration_completes_inference_and_preserves_source(self):
+        artifact = {'T_C': 1.25, 'data_origin': 'software_fixture'}
+        self.calibration.write_text(json.dumps(artifact), encoding='utf-8-sig')
+        original = self.calibration.read_bytes()
+        with self.loaded(), patch.object(inference, 'assess_frame',
+                return_value={'candidates': deepcopy(self.candidates)}) as assess:
+            result = self.call()
+        self.assertEqual(assess.call_args.args[4], artifact)
+        output = Path(result['output_dir'])
+        saved = json.loads((output / 'predictions.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['predictions'], 2)
+        self.assertEqual([item['class_id'] for item in saved['predictions']], [0, 1])
+        self.assertEqual([item['score'] for item in saved['predictions']], [.95, .1])
+        provenance = json.loads((output / 'provenance.json').read_text(encoding='utf-8'))
+        self.assertEqual(provenance['inputs']['calibration']['sha256'],
+                         hashlib.sha256(original).hexdigest())
+        self.assertEqual(self.calibration.read_bytes(), original)
+        with Image.open(output / 'rgb_with_detections.png') as image:
+            self.assertEqual(image.size, (40, 20))
+
+    def test_utf8_bom_class_name_file_labels_predictions_and_provenance(self):
+        names = self.root / 'names-bom.json'
+        mapping = {'0': 'ripe_from_bom', '1': 'unripe_from_bom'}
+        names.write_text(json.dumps(mapping), encoding='utf-8-sig')
+        original = names.read_bytes()
+        with self.loaded(), patch.object(inference, 'assess_frame',
+                return_value={'candidates': deepcopy(self.candidates)}):
+            result = self.call(class_names=names)
+        output = Path(result['output_dir'])
+        saved = json.loads((output / 'predictions.json').read_text(encoding='utf-8'))
+        self.assertEqual(result['predictions'], 2)
+        self.assertEqual([item['class_name'] for item in saved['predictions']],
+                         ['ripe_from_bom', 'unripe_from_bom'])
+        provenance = json.loads((output / 'provenance.json').read_text(encoding='utf-8'))
+        self.assertEqual(provenance['class_names'], mapping)
+        self.assertEqual(names.read_bytes(), original)
+        with Image.open(output / 'rgb_with_detections.png') as image:
+            self.assertEqual(image.size, (40, 20))
+
     def test_native_checkpoint_uses_only_generated_software_fixture(self):
         from tefed.engine import save_checkpoint
         from tefed.model import RoutedYOLO, Router
@@ -171,7 +210,7 @@ class SingleInferenceTests(unittest.TestCase):
         config['evaluation']['max_detections'] = 2
         model, router = RoutedYOLO(config), Router(.5)
         checkpoint = self.root / 'native-software-fixture.pt'
-        # This initialized fixture has completed no training rounds.
+        # Untrained checkpoint fixture.
         save_checkpoint(checkpoint, model, router, config, {'client0': deepcopy(STATE)}, [], -1)
         record = load_manifest(config['experiment']['manifest']).by_split('unlabeled', 'client0')[0]
         result = self.call(checkpoint=checkpoint, calibration=config['experiment']['calibration'],

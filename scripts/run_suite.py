@@ -14,6 +14,9 @@ def plans(name):
     if name=='factorial':
         from tefed.experiments import factorial_plans
         return factorial_plans()
+    if name=='conditions':
+        from tefed.experiments import condition_plans
+        return condition_plans()
     if name=='replay':
         return [(arm,{'experiment':{'method':'tefed'},'replay':{'arm':arm}}) for arm in ('matched','independent')]
     if name=='comparisons':
@@ -69,7 +72,7 @@ def _timestamp():
 def _job_config(config, manifest, job):
     from tefed.baselines import policy_dict
     resolved = merge(config, job['patch'])
-    if manifest.get('version') == 'tefed-factorial-v1':
+    if manifest.get('version') in {'tefed-factorial-v1', 'tefed-conditions-v1'}:
         resolved['factorial']['plan_sha256'] = manifest['protocol_sha256']
     resolved['experiment']['seed'] = job['seed']
     method = resolved['experiment'].get('method', 'tefed')
@@ -97,14 +100,19 @@ def _binding_scope(config):
 
 def make_manifest(config, name, root):
     from tefed.data import load_manifest
-    from tefed.engine import source_secret, validate_run_config
-    from tefed.experiments import canonical_hash, factorial_manifest, validate_factorial_config
+    from tefed.engine import source_secret, validate_run_config, validate_manifest_config
+    from tefed.experiments import canonical_hash, condition_manifest, factorial_manifest, validate_factorial_config
     from tefed.resume import file_hash, run_binding
-    seeds = config['experiment'].get('seeds', list(range(10)))
+    local = config.get('communication', {}).get('mode', 'local') == 'local'
+    data = load_manifest(config['experiment']['manifest'], strict_files=local)
+    validate_manifest_config(config, data)
+    seeds = config['experiment'].get('seeds', list(range(5)))
     if not seeds or len(set(seeds)) != len(seeds) or any(type(seed) is not int or seed < 0 for seed in seeds):
         raise ValueError('Seed IDs must be distinct nonnegative integers')
     if name == 'factorial':
         manifest = factorial_manifest(config, seeds, root)
+    elif name == 'conditions':
+        manifest = condition_manifest(config, seeds, root)
     else:
         jobs = [{'variant': variant, 'seed': seed, 'patch': patch,
                  'output': str(root / variant / f'seed_{seed}')}
@@ -126,8 +134,6 @@ def make_manifest(config, name, root):
         resolved = _job_config(config, manifest, job)
         validate_run_config(resolved)
         validate_factorial_config(resolved)
-    local = config.get('communication', {}).get('mode', 'local') == 'local'
-    data = load_manifest(config['experiment']['manifest'], strict_files=local)
     binding = None
     scopes = {}
     for job in manifest['jobs']:
@@ -241,6 +247,9 @@ def _inspect_job(job, manifest, total_rounds, committed=None):
 
 
 def _publish_factorial(root, manifest, execution):
+    if manifest['suite_plan'] == 'conditions':
+        _publish_conditions(root, manifest, execution)
+        return
     if manifest['suite_plan'] != 'factorial':
         return
     records = {'factorial_runs.jsonl': []}
@@ -261,9 +270,45 @@ def _publish_factorial(root, manifest, execution):
         _atomic_text(root / name, ''.join(json.dumps(row, allow_nan=False) + '\n' for row in rows))
 
 
+def _publish_conditions(root, manifest, execution):
+    """Export completed condition scores and evaluation IDs."""
+    from tefed.experiments import canonical_hash
+    records = {'condition_runs.jsonl': []}
+    for job, entry in zip(manifest['jobs'], execution['jobs']):
+        if entry['status'] != 'completed':
+            continue
+        metrics = entry['result']['metrics']
+        evaluation = _read(Path(job['output']) / 'predictions' / 'evaluation_manifest.json')
+        config = _read(Path(job['output']) / 'configuration.json')
+        if evaluation.get('seed') != job['seed']:
+            raise ValueError('Condition evaluation seed differs from its completed job')
+        records['condition_runs.jsonl'].append({
+            'seed': job['seed'], 'factors': job['factors'], 'metrics': metrics,
+            'protocol_sha256': manifest['protocol_sha256'], 'output': job['output'],
+            'status': 'completed'})
+        for view, values in metrics.items():
+            identities = evaluation.get('views', {}).get(view, {}).get('records')
+            if not isinstance(identities, list) or not identities:
+                raise ValueError(f'Condition evaluation lacks identities for {view}')
+            ids = [str(row['id']) for row in identities]
+            if len(set(ids)) != len(ids):
+                raise ValueError('Condition evaluation contains duplicate identities')
+            for metric, value in values.items():
+                if metric in ('mAP50', 'AP75', 'mAP50_95'):
+                    records.setdefault(f'conditions_{view}_{metric}.jsonl', []).append({
+                        'seed': job['seed'], 'factors': job['factors'], 'value': value,
+                        'partition_sha256': job['bindings']['manifest_sha256'],
+                        'evaluation_ids_sha256': canonical_hash(sorted(ids)),
+                        'view': view, 'metric': metric,
+                        'checkpoint_round': config['experiment']['rounds'],
+                        'protocol_sha256': manifest['protocol_sha256']})
+    for name, rows in records.items():
+        _atomic_text(root / name, ''.join(json.dumps(row, allow_nan=False) + '\n' for row in rows))
+
+
 def run_suite(config, name, output, *, execute=False, resume=False, runner=None):
     from tefed.engine import run_experiment, validate_run_config
-    from tefed.experiments import FACTORIAL_DEFINITIONS
+    from tefed.experiments import CONDITION_DEFINITIONS, FACTORIAL_DEFINITIONS
     from tefed.resume import run_lock
     root = Path(output).expanduser().resolve()
     validate_run_config(config)
@@ -278,6 +323,8 @@ def run_suite(config, name, output, *, execute=False, resume=False, runner=None)
                 raise ValueError('Suite plan, configuration, seeds, operations or input binding changed')
             if name == 'factorial' and _read(root / 'operation_definitions.json') != FACTORIAL_DEFINITIONS:
                 raise ValueError('Suite operation definitions changed')
+            if name == 'conditions' and _read(root / 'operation_definitions.json') != CONDITION_DEFINITIONS:
+                raise ValueError('Suite condition definitions changed')
             execution = _read(root / 'execution.json') if (root / 'execution.json').is_file() else None
             if execution is None and any(Path(job['output']).exists() for job in manifest['jobs']):
                 raise ValueError('Existing jobs require the original execution.json history')
@@ -305,12 +352,14 @@ def run_suite(config, name, output, *, execute=False, resume=False, runner=None)
                 raise ValueError(f"Invalid suite job state: {job['variant']} seed {job['seed']}")
             inspections.append(_inspect_job(job, manifest, int(config['experiment'].get('rounds', 30)),
                                            entry.get('result') if entry['status'] == 'completed' else None))
-        # Commit only after every existing job has passed read-only validation.
+        # Validate existing jobs before writing.
         root.mkdir(parents=True, exist_ok=True)
         if not resume:
             _write(root / 'plan.json', manifest)
             if name == 'factorial':
                 _write(root / 'operation_definitions.json', FACTORIAL_DEFINITIONS)
+            elif name == 'conditions':
+                _write(root / 'operation_definitions.json', CONDITION_DEFINITIONS)
         print(json.dumps({'jobs': len(manifest['jobs']), 'execute': execute,
                           'resume': resume, 'plan_file': str(root / 'plan.json')}, indent=2))
         if not execute:
@@ -361,10 +410,10 @@ def main():
     from tefed.engine import load_config
     p=argparse.ArgumentParser()
     p.add_argument('--config',required=True)
-    p.add_argument('--plan',choices=['comparisons','mechanisms','budgets','components','factorial','replay'],required=True)
+    p.add_argument('--plan',choices=['comparisons','mechanisms','budgets','components','conditions','factorial','replay'],required=True)
     p.add_argument('--output',required=True)
     p.add_argument('--execute',action='store_true')
-    p.add_argument('--resume',action='store_true',help='Validate the existing suite and continue unfinished jobs')
+    p.add_argument('--resume',action='store_true',help='Validate the suite and resume interrupted jobs')
     args=p.parse_args()
     run_suite(load_config(args.config),args.plan,args.output,execute=args.execute,resume=args.resume)
 

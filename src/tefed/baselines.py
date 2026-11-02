@@ -21,6 +21,7 @@ METHOD_REGISTRY = {
     "consistent_teacher_fedawa": "EMA consistency with an explicit adaptive aggregation adaptation",
     "fedsto": "Round-reset EMA teacher and two-stage local training",
     "fsslod": "Scheduled EMA teacher with an explicit elastic anchoring adaptation",
+    "proxyfl": "Classifier-proxy tuning with possible-class contrastive learning",
     "server_moe": "Routed expert model without rendered correction cases",
     "generic_hc": "Generic hard-case correction with the matched rendering/reuse schedule",
     "tefed": "Source-evidence verification and state-matched reuse",
@@ -38,6 +39,8 @@ for _method in _EXPERT_METHODS:
 BASELINE_CONFIG_KEYS["fedprox"].add("proximal_mu")
 BASELINE_CONFIG_KEYS["fedsto"].update({"orthogonal_coefficient", "head_only_epochs"})
 BASELINE_CONFIG_KEYS["fsslod"].update({"elastic_coefficient", "teacher_decay_start", "teacher_decay_end"})
+BASELINE_CONFIG_KEYS["proxyfl"].update({"pseudo_threshold", "proxy_weight", "proposal_floor",
+                                        "server_steps", "server_learning_rate", "prior_momentum"})
 BASELINE_CONFIG_KEYS["consistent_teacher_fedawa"].update({
     "aggregation_temperature", "aggregation_cap", "reference_weighting",
     "aggregation_mode", "fedawa_steps", "fedawa_learning_rate",
@@ -70,7 +73,7 @@ def validate_baseline_config(config: Mapping[str, Any] | None = None) -> None:
                 if not isinstance(value, str) or value not in {"directional", "fedawa_paper"}:
                     raise ValueError(f"{name} must be directional or fedawa_paper")
                 continue
-            if key == "fedawa_steps":
+            if key in {"fedawa_steps", "server_steps"}:
                 if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                     raise ValueError(f"{name} must be a positive integer")
                 continue
@@ -82,6 +85,12 @@ def validate_baseline_config(config: Mapping[str, Any] | None = None) -> None:
                     raise ValueError(f"{name} must be a nonnegative integer below experiment.local_epochs")
                 continue
             number = _nonnegative(value, name)
+            if key in {"proposal_floor", "prior_momentum"} and number > 1:
+                raise ValueError(f"{name} must lie in [0, 1]")
+            if key == "prior_momentum" and number == 1:
+                raise ValueError(f"{name} must be below 1")
+            if key == "server_learning_rate" and number == 0:
+                raise ValueError(f"{name} must be positive")
             if key in {"pseudo_threshold", "teacher_decay", "teacher_decay_start", "teacher_decay_end", "aggregation_cap"} and number > 1:
                 raise ValueError(f"{name} must lie in [0, 1]")
             if key in {"aggregation_temperature", "aggregation_cap", "fedawa_learning_rate"} and number == 0:
@@ -429,7 +438,7 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
     scheduled = fsslod_ema_decay(round_index, epoch_index) if config is None else start + span * (epochs * round_index + epoch_index) / max(1, rounds * epochs - 1)
     policy = {
         "method": method, "round_index": round_index, "epoch_index": epoch_index,
-        "pseudo_threshold": 0.75,
+        "pseudo_threshold": 0.95 if method == "proxyfl" else 0.75,
         "use_unlabeled": method not in {"local", "fedavg", "fedprox", "fedbn"},
         "use_experts": experts,
         "active_heads": "routed" if experts else [0],
@@ -444,7 +453,7 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
         "elastic_coefficient": 0.10 if method == "fsslod" else 0.0,
         "consistency_weight": float((config or {}).get("loss", {}).get("gamma", .5)) if experts else 0.50 if teacher else 0.0,
         "preserve_client_batchnorm": method == "fedbn",
-        "aggregation": "none" if method == "local" else "fedawa_paper" if paper_aggregation else "adaptive_directional" if method == "consistent_teacher_fedawa" else "expert_state_quality" if experts else "sample_weighted",
+        "aggregation": "none" if method == "local" else "proxyfl" if method == "proxyfl" else "fedawa_paper" if paper_aggregation else "adaptive_directional" if method == "consistent_teacher_fedawa" else "expert_state_quality" if experts else "sample_weighted",
         "aggregation_mode": "fedawa_paper" if paper_aggregation else "directional" if method == "consistent_teacher_fedawa" else None,
         "aggregation_temperature": None if paper_aggregation else 1.0,
         "aggregation_cap": 0.50 if method == "consistent_teacher_fedawa" and not paper_aggregation else None,
@@ -458,6 +467,11 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
     }
     policy.update({key: value if key in {"reference_weighting", "aggregation_mode", "head_only_epochs", "fedawa_steps"} else float(value)
                    for key, value in overrides.items() if key not in {"teacher_decay_start", "teacher_decay_end"}})
+    if method == 'proxyfl':
+        for key, value in {'proxy_weight': 1.0, 'proposal_floor': .05, 'server_steps': 10,
+                           'server_learning_rate': .005, 'prior_momentum': .99}.items():
+            policy.setdefault(key, value)
+        policy['server_steps'] = int(policy['server_steps'])
     return policy
 
 

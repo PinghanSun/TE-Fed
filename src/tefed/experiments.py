@@ -1,4 +1,4 @@
-"""Explicit executable factorial protocols and artifact bindings."""
+"""Build experiment plans and input bindings."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -16,6 +16,13 @@ FACTORIAL_DEFINITIONS = {
           'off': 'Generic HC held-out coarse priors and current-route verification; no effect when C is off.'},
     'C': {'on': 'Correction-capable training, rendering, verification, pool insertion and next-round selection.',
           'off': 'Server-MoE; disable the entire correction path, including descriptor collection.'},
+}
+
+CONDITION_VERSION = 'tefed-conditions-v1'
+CONDITION_DEFINITIONS = {
+    'A': deepcopy(FACTORIAL_DEFINITIONS['A']),
+    'E': {'on': 'Enable the complete source-evidence correction path (B=1 and C=1).',
+          'off': 'Disable correction and train Server-MoE (B=0 and C=0).'},
 }
 
 
@@ -48,6 +55,14 @@ def factorial_plans():
                  'factorial': {'version': FACTORIAL_VERSION, 'definitions_sha256': definitions, 'factors': factors}}
         jobs.append((f'A{a}_B{b}_C{c}', patch))
     return jobs
+
+
+def condition_plans():
+    """Build four A/E conditions with B=C=E."""
+    legacy = {tuple(patch['factorial']['factors'][key] for key in ('A', 'B', 'C')): patch
+              for _, patch in factorial_plans()}
+    return [(f'A{a}E{e}', deepcopy(legacy[(a, e, e)]))
+            for e, a in product((0, 1), repeat=2)]
 
 
 def validate_factorial_config(config):
@@ -114,4 +129,25 @@ def factorial_manifest(config, seeds, output):
             'configuration_sha256': canonical_hash(resolved),
             'structural_null': 'B has no training effect when C=0; no separate B-to-router path is added.',
             'jobs': jobs}
+    return {**body, 'protocol_sha256': canonical_hash(body)}
+
+
+def condition_manifest(config, seeds, output):
+    """Bind four effective conditions to the same declared run inputs."""
+    legacy = factorial_manifest(config, seeds, output)
+    body = {key: value for key, value in legacy.items()
+            if key not in {'version', 'operations', 'definitions_sha256', 'structural_null',
+                           'jobs', 'protocol_sha256'}}
+    body.update(version=CONDITION_VERSION, operations=deepcopy(CONDITION_DEFINITIONS),
+                definitions_sha256=canonical_hash(CONDITION_DEFINITIONS),
+                underlying_protocol=FACTORIAL_VERSION,
+                condition_mapping='E=0 maps to B=C=0; E=1 maps to B=C=1.',
+                repetition_unit='declared seed IDs; paired block IDs require a separate block manifest')
+    body['jobs'] = [
+        {'variant': variant, 'seed': seed,
+         'factors': {'A': patch['factorial']['factors']['A'], 'E': patch['factorial']['factors']['C']},
+         'factorial_factors': deepcopy(patch['factorial']['factors']),
+         'patch': patch, 'bindings': legacy['bindings'],
+         'output': str(Path(output) / variant / f'seed_{seed}')}
+        for variant, patch in condition_plans() for seed in legacy['seed_ids']]
     return {**body, 'protocol_sha256': canonical_hash(body)}

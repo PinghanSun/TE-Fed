@@ -26,7 +26,8 @@ def parser():
     paired = sub.add_parser('paired', help='Same-seed right-minus-left scores from complete executed runs')
     paired.add_argument('--left', nargs='+', required=True)
     paired.add_argument('--right', nargs='+', required=True)
-    paired.add_argument('--seeds', nargs='+', default=list(map(str, range(10))))
+    paired.add_argument('--seeds', nargs='+', default=list(map(str, range(10))),
+                        help='Seed IDs to compare (default: 0-9)')
     paired.add_argument('--metrics', nargs='+', default=['mAP50', 'AP75', 'mAP50_95'])
     for item in (reliability, routing, paired):
         item.add_argument('--out', required=True, help='New JSON result path; existing files are preserved')

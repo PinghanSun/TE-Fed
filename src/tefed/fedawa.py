@@ -30,12 +30,10 @@ def _coordinates(vectors):
 
 def paper_aggregation_weights(client_vectors, global_vector, *, logits=None, sample_counts=None,
                               steps=1, learning_rate=.001):
-    """Return post-optimization weights and resumable logits, without a weight cap.
+    """Optimize Eq. 3 and return post-step weights and resumable logits.
 
-    Eq. 3 compares the aggregated parameter vector with the broadcast vector.
-    The released implementation instead averages individual cosine penalties
-    and returns probabilities from before its last step. This mode uses Eq. 3
-    and post-step probabilities. Adam settings follow the released optimizer.
+    Compare the aggregated parameter vector with the broadcast vector.
+    Weights are uncapped; Adam settings follow the reference optimizer.
     """
     import torch
     import torch.nn.functional as F

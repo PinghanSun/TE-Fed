@@ -1,4 +1,4 @@
-"""Analyze measured runs and device records; reject missing or inconsistent evidence."""
+"""Analyze run metrics and device measurements."""
 from __future__ import annotations
 
 import csv
@@ -11,7 +11,9 @@ from typing import Mapping, Sequence
 
 import numpy as np
 
+# Seed summaries default to ten runs; paired analyses default to five declared blocks.
 DEFAULT_SEEDS=tuple(range(10))
+DEFAULT_BLOCKS=tuple(range(5))
 ENERGY_NODES=("J1","J2","J3","J4","serverGPU")
 
 
@@ -107,10 +109,10 @@ def compare_exposure(left_rounds,right_rounds):
 
 
 def factorial_contrasts(records,metric="value",expected_seeds=DEFAULT_SEEDS,scale=1.):
-    """Compute within-seed 2x2x2 contrasts from seed, factors A/B/C, and metric.
+    """Compute within-seed 2x2x2 contrasts from A/B/C factor bits.
 
-    S8 scales signed sums by 1/4, 1/2, and 1 for main, pair, and triple effects.
-    Factor bits describe the supplied rows; they do not verify executed operations."""
+    S8 scales signed sums by 1/4, 1/2 and 1 for main, pair and triple effects.
+    """
     expected=_seed_ids(expected_seeds)
     scale=_finite(scale,"contrast scale")
     cells={seed:{} for seed in expected}
@@ -144,6 +146,179 @@ def factorial_contrasts(records,metric="value",expected_seeds=DEFAULT_SEEDS,scal
     return {"per_seed":per_seed,"summary":summaries,"scale":scale,
             "execution_inference":"none; supplied factor bits require separate operation definitions",
             "sign":"positive means larger supplied metric; no favorable-sign reversal inferred"}
+
+
+def _block_identifier(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int, np.integer)) or not str(value).strip():
+        raise ValueError("block IDs must be nonempty strings or integers")
+    return str(value)
+
+
+def _identity_digest(value, name):
+    if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdefABCDEF' for c in value):
+        raise ValueError(f"{name} must be a SHA-256 digest")
+    return value.lower()
+
+
+def _block_bindings(block_manifest, expected_blocks):
+    expected = [_block_identifier(value) for value in expected_blocks]
+    if len(expected) < 2 or len(set(expected)) != len(expected):
+        raise ValueError("sample SD requires at least two distinct declared blocks")
+    if not isinstance(block_manifest, Mapping) or block_manifest.get('schema_version') != 1 \
+            or not isinstance(block_manifest.get('blocks'), list):
+        raise ValueError("block manifest requires schema_version=1 and a blocks list")
+    bindings = {}
+    for block in block_manifest['blocks']:
+        if not isinstance(block, Mapping):
+            raise ValueError("block manifest entries must be objects")
+        uid = _block_identifier(block.get('block_id'))
+        if uid in bindings:
+            raise ValueError(f"duplicate declared block {uid}")
+        bindings[uid] = (_integer(block.get('seed'), 'block seed'),
+                         _identity_digest(block.get('partition_sha256'), 'partition_sha256'),
+                         _identity_digest(block.get('evaluation_ids_sha256'), 'evaluation_ids_sha256'))
+    if set(bindings) != set(expected):
+        raise ValueError("block manifest does not match the declared block IDs")
+    return expected, bindings
+
+
+def _record_block(row, bindings):
+    if not isinstance(row, Mapping):
+        raise ValueError("paired records must be objects")
+    identity = (_integer(row.get('seed'), 'record seed'),
+                _identity_digest(row.get('partition_sha256'), 'partition_sha256'),
+                _identity_digest(row.get('evaluation_ids_sha256'), 'evaluation_ids_sha256'))
+    if 'block_id' in row:
+        uid = _block_identifier(row['block_id'])
+        if uid not in bindings or bindings[uid] != identity:
+            raise ValueError("record seed or partition/evaluation identities differ from its declared block")
+        return uid
+    matches = [uid for uid, binding in bindings.items() if binding == identity]
+    if len(matches) != 1:
+        raise ValueError("record requires one matching block identity; ambiguous mappings need explicit block_id")
+    return matches[0]
+
+
+def _block_summary(values, expected):
+    array = np.asarray(values, dtype=float)
+    return {'mean': float(array.mean()), 'sample_sd': float(array.std(ddof=1)),
+            'n': len(array), 'block_ids': expected, 'values': array.tolist()}
+
+
+def condition_contrasts(records, block_manifest, metric="value", expected_blocks=DEFAULT_BLOCKS, scale=1.):
+    """Compute four-condition A/E contrasts within declared blocks.
+
+    The block manifest defines seed, partition and evaluation-ID hashes.
+    All four conditions must match these identities. scale=100 converts
+    AP differences from 0-1 to percentage points.
+    """
+    expected, bindings = _block_bindings(block_manifest, expected_blocks)
+    scale = _finite(scale, 'contrast scale')
+    if scale <= 0:
+        raise ValueError("contrast scale must be positive")
+    cells = {uid: {} for uid in expected}
+    scope = None
+    block_protocols = {}
+    for row in records:
+        uid = _record_block(row, bindings)
+        factors = row.get('factors')
+        if not isinstance(factors, Mapping) or set(factors) != {'A', 'E'}:
+            raise ValueError("condition records require explicit A/E factor bits")
+        bits = tuple(factors[key] for key in ('A', 'E'))
+        if any(isinstance(bit, bool) or not isinstance(bit, (int, np.integer)) or bit not in (0, 1) for bit in bits):
+            raise ValueError("A/E levels must be integer 0/1")
+        if bits in cells[uid]:
+            raise ValueError(f"duplicate condition in block {uid}: {bits}")
+        current_scope = {key: row.get(key) for key in ('setting_id', 'view', 'metric', 'checkpoint_round')}
+        if scope is None:
+            scope = current_scope
+        elif current_scope != scope:
+            raise ValueError("condition records mix settings, views, metrics or checkpoints")
+        protocol = row.get('protocol_sha256')
+        if protocol is not None:
+            protocol = _identity_digest(protocol, 'protocol_sha256')
+        if uid in block_protocols and block_protocols[uid] != protocol:
+            raise ValueError(f"condition records mix protocols within block {uid}")
+        block_protocols[uid] = protocol
+        cells[uid][bits] = _finite(row.get(metric), f'block {uid}/{bits}/{metric}')
+    per_block = []
+    combinations = {(a, e) for a in (0, 1) for e in (0, 1)}
+    for uid in expected:
+        if set(cells[uid]) != combinations:
+            raise ValueError(f"block {uid} requires all four A/E conditions")
+        values = cells[uid]
+        a0 = values[(1, 0)] - values[(0, 0)]
+        a1 = values[(1, 1)] - values[(0, 1)]
+        per_block.append({'block_id': uid, 'seed': bindings[uid][0],
+                          'protocol_sha256': block_protocols[uid],
+                          'A_at_E0': scale * a0, 'A_at_E1': scale * a1,
+                          'E_at_A0': scale * (values[(0, 1)] - values[(0, 0)]),
+                          'E_at_A1': scale * (values[(1, 1)] - values[(1, 0)]),
+                          'A_x_E': scale * (a1 - a0)})
+
+    contrasts = {key: _block_summary([row[key] for row in per_block], expected)
+                 for key in ('A_at_E0', 'A_at_E1', 'E_at_A0', 'E_at_A1', 'A_x_E')}
+    cell_summaries = {f'A{a}E{e}': _block_summary([cells[uid][(a, e)] for uid in expected], expected)
+                      for e in (0, 1) for a in (0, 1)}
+    return {'per_block': per_block, 'summary': contrasts, 'cells': cell_summaries,
+            'scale': scale, 'cell_scale': 'input values; scale applies only to contrasts',
+            'scope': scope, 'block_manifest': block_manifest,
+            'block_protocol_sha256': block_protocols,
+            'uncertainty': 'sample SD across declared paired blocks',
+            'interaction': '(A1E1 - A0E1) - (A1E0 - A0E0), calculated within each block',
+            'execution_inference': 'operation execution is established separately by run artifacts'}
+
+
+def paired_method_summary(records, block_manifest, methods, reference='tefed', metric='value',
+                          expected_blocks=DEFAULT_BLOCKS, scale=100.):
+    """Summarize methods and reference-minus-comparator differences within blocks.
+
+    Partitions may differ between blocks. Every method in a given block must
+    match its declared partition and evaluation identities. Raw means retain
+    the input scale; only paired differences are multiplied by ``scale``.
+    """
+    expected, bindings = _block_bindings(block_manifest, expected_blocks)
+    methods = list(methods)
+    if len(methods) < 2 or any(not isinstance(method, str) or not method.strip() for method in methods) \
+            or len(set(methods)) != len(methods) or reference not in methods:
+        raise ValueError('declare at least two distinct method names including the reference')
+    scale = _finite(scale, 'difference scale')
+    if scale <= 0:
+        raise ValueError('difference scale must be positive')
+    cells = {uid: {} for uid in expected}
+    scope = None
+    for row in records:
+        uid = _record_block(row, bindings)
+        method = row.get('method')
+        if not isinstance(method, str) or method not in methods:
+            raise ValueError(f'undeclared paired method: {method!r}')
+        if method in cells[uid]:
+            raise ValueError(f'duplicate method {method} in block {uid}')
+        current_scope = {key: row.get(key) for key in ('setting_id', 'view', 'metric', 'checkpoint_round')}
+        if scope is None:
+            scope = current_scope
+        elif current_scope != scope:
+            raise ValueError('paired records mix settings, views, metrics or checkpoints')
+        cells[uid][method] = _finite(row.get(metric), f'block {uid}/{method}/{metric}')
+    per_block = []
+    others = [method for method in methods if method != reference]
+    for uid in expected:
+        if set(cells[uid]) != set(methods):
+            raise ValueError(f'block {uid} requires every declared method')
+        scores = cells[uid]
+        per_block.append({'block_id': uid, 'seed': bindings[uid][0], 'scores': scores,
+                          'reference_minus_comparator': {
+                              method: scale * (scores[reference] - scores[method]) for method in others}})
+    summaries = {method: _block_summary([cells[uid][method] for uid in expected], expected)
+                 for method in methods}
+    differences = {method: {'reference': reference, 'comparator': method,
+                           **_block_summary([row['reference_minus_comparator'][method]
+                                             for row in per_block], expected)} for method in others}
+    return {'methods': summaries, 'paired_differences': differences, 'per_block': per_block,
+            'reference': reference, 'difference_scale': scale, 'method_scale': 'input values',
+            'scope': scope, 'block_manifest': block_manifest,
+            'uncertainty': 'sample SD across declared paired blocks',
+            'difference_order': 'reference minus comparator, computed within each block before aggregation'}
 
 
 def read_jsonl(path):
@@ -357,7 +532,7 @@ def integrate_round_energy(power_rows,rounds,*,required_nodes=ENERGY_NODES,expec
 
 
 def latency_p95_worst_client(rows,*,expected_nodes=("J1","J2","J3","J4"),samples_per_node=200):
-    """Return the worst node P95 across four nodes with 200 requests each."""
+    """Return the maximum node P95 using linear interpolation."""
     samples_per_node=_integer(samples_per_node,"samples_per_node")
     if samples_per_node<200:
         raise ValueError("the declared protocol requires at least200 recorded requests/node")

@@ -2,8 +2,11 @@ task = "tomato"
 
 [experiment]
 method = "tefed"
-seeds = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-rounds = 30
+# Five run IDs; pair methods using an explicit block manifest.
+seeds = [0, 1, 2, 3, 4]
+rounds = 300
+# Completed-round counts. For a separate long run: rounds=1000 and [300,500,1000].
+save_rounds = [300]
 local_epochs = 2
 batch_size = 4
 manifest = "data/tomato/manifest.json"
@@ -19,6 +22,8 @@ specialist_width = 0.75
 image_size = 640
 depth_scale = 65535.0
 weights = ""
+# Set to the final.pt from the shared pretraining run before calibrating/training.
+initial_checkpoint = ""
 head_loss_policy = "route_weighted"
 contrastive_dim = 128
 contrastive_feature_level = -1
@@ -76,6 +81,7 @@ blender = "blender"
 scene = "assets/tomato_greenhouse_project_assets_style.blend"
 timeout = 300
 samples = 16
+# Set depth_unit_conversion from scene units to dataset depth units.
 
 [evaluation]
 monitor_every = 1
@@ -112,3 +118,11 @@ teacher_decay_start = 0.99
 teacher_decay_end = 0.999
 consistency_weight = 0.5
 elastic_coefficient = 0.1
+
+[baselines.proxyfl]
+pseudo_threshold = 0.95
+proxy_weight = 1.0
+proposal_floor = 0.05
+server_steps = 10
+server_learning_rate = 0.005
+prior_momentum = 0.99

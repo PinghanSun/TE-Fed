@@ -21,7 +21,10 @@ def parser():
     p.add_argument('--version',action='version',version=f'%(prog)s {__version__}')
     commands=p.add_subparsers(dest='command',required=True)
     commands.add_parser('methods',help='List implemented comparison strategies')
-    preview=commands.add_parser('preview',help='Preview RGB, depth and NIR inputs without a checkpoint')
+    check=commands.add_parser('check',help='Check config, data, calibration and renderer before training')
+    check.add_argument('--config',required=True)
+    check.add_argument('--stage',choices=('pretrain','train'),default='train')
+    preview=commands.add_parser('preview',help='Preview dataset inputs without a checkpoint')
     preview.add_argument('--example',required=True,help='Example directory containing manifest.json and original PNGs')
     preview.add_argument('--output',required=True,help='New directory for preview images and display metadata')
     infer=commands.add_parser('infer',help='Run frozen single-sample inference with a compatible TE-Fed checkpoint')
@@ -29,14 +32,14 @@ def parser():
     infer.add_argument('--calibration',required=True,help='Frozen calibration JSON associated with the checkpoint')
     infer.add_argument('--rgb',required=True)
     infer.add_argument('--depth',required=True)
-    infer.add_argument('--nir',required=True,help='Prepared uint8 PNG or floating-point [0,1] NPY; not the preview display image')
+    infer.add_argument('--nir',required=True,help='Prepared uint8 image or floating-point [0,1] NPY')
     infer.add_argument('--sample-id',required=True)
     infer.add_argument('--client-id',required=True,help='Client whose frozen state exists in the checkpoint')
     infer.add_argument('--output',required=True,help='New directory for predictions and the RGB overlay')
     infer.add_argument('--device',default='cpu')
-    infer.add_argument('--display-confidence',type=float,default=.25,help='Overlay threshold only; all model candidates remain in predictions.json')
+    infer.add_argument('--display-confidence',type=float,default=.25,help='Overlay threshold; predictions.json retains all candidates')
     infer.add_argument('--class-names',help='Optional JSON mapping of class IDs to names')
-    infer.add_argument('--round-id',type=int,default=0,help='Reference-augmentation seed context; existing evaluation defaults to 0')
+    infer.add_argument('--round-id',type=int,default=0,help='Reference-augmentation context (default: 0)')
     validate=commands.add_parser('validate',help='Check manifests and partition/calibration identities')
     validate.add_argument('manifest')
     validate.add_argument('--check-files',action='store_true')
@@ -68,7 +71,7 @@ def parser():
 def _calibrate(args):
     import numpy as np
     import torch
-    from .engine import load_config,load_checkpoint,write_json,prepared_sample,assess_frame,apply_input_policy
+    from .engine import load_config,load_checkpoint,write_json,prepared_sample,assess_frame,apply_input_policy,_check_evaluation_classes
     from .model import sample_tensor
     from .losses import WeightedNativeLoss
     from .data import load_manifest
@@ -79,6 +82,7 @@ def _calibrate(args):
     model.eval(); router.eval()
     criterion=WeightedNativeLoss(model,0)
     manifest=load_manifest(config['experiment']['manifest'],strict_files=True)
+    _check_evaluation_classes(model,manifest,config)
     def prep(sample):
         return apply_input_policy(sample,config)
     @torch.no_grad()
@@ -119,6 +123,17 @@ def _calibrate(args):
 
 def main(argv=None):
     args=parser().parse_args(argv)
+    if args.command=='check':
+        try:
+            from .engine import load_config
+            from .preflight import check_setup
+            result=check_setup(load_config(args.config),stage=args.stage)
+        except ModuleNotFoundError as error:
+            parser().exit(2,f'Training dependencies are unavailable ({error}). Run uv sync --locked --extra cpu.\n')
+        except (OSError,ValueError,TypeError,KeyError) as error:
+            parser().exit(2,f'Configuration check failed: {error}\n')
+        print(json.dumps(result,ensure_ascii=False,indent=2))
+        return 0 if result['status']=='passed' else 2
     if args.command=='preview':
         from .preview import preview_example
         try:

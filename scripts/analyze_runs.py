@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
-from tefed.analysis import (analyze_run_dirs,compare_exposure,factorial_contrasts,
+from tefed.analysis import (analyze_run_dirs,compare_exposure,condition_contrasts,factorial_contrasts,paired_method_summary,
     integrate_round_energy,latency_p95_worst_client,read_jsonl,read_power_csv,case_event_proportions)
 
 
@@ -16,7 +16,15 @@ def parser():
     sub=p.add_subparsers(dest="command",required=True)
     summary=sub.add_parser("summary",help="Exact declared seeds from completed engine runs")
     summary.add_argument("--runs",nargs="+",required=True)
-    summary.add_argument("--seeds",nargs="+",default=list(map(str,range(10))))
+    summary.add_argument("--seeds",nargs="+",default=list(map(str,range(5))))
+    paired=sub.add_parser("paired",help="Method means and within-block differences with a declared block identity map")
+    paired.add_argument("--records",required=True,help="JSONL of method, seed, value and partition/evaluation hashes")
+    paired.add_argument("--block-manifest",required=True)
+    paired.add_argument("--methods",nargs="+",required=True,help="Exact method names present in every block")
+    paired.add_argument("--reference",default="tefed")
+    paired.add_argument("--blocks",nargs="+",default=list(map(str,range(5))))
+    paired.add_argument("--metric",default="value")
+    paired.add_argument("--scale",type=float,default=100.,help="Multiplier for paired differences; raw means retain their input scale")
     exposure=sub.add_parser("exposure",help="Actual client-round correction and update counts")
     exposure.add_argument("--left",required=True,help="rounds.jsonl or its run directory")
     exposure.add_argument("--right",required=True)
@@ -27,17 +35,23 @@ def parser():
     factorial.add_argument("--metric",default="value")
     factorial.add_argument("--scale",type=float,default=1.)
     factorial.add_argument("--seeds",nargs="+",default=list(map(str,range(10))))
+    conditions=sub.add_parser("conditions",help="Four A/E conditions with an explicit paired-block identity map")
+    conditions.add_argument("--records",required=True,help="JSONL of seed, A/E factors, value and identity hashes")
+    conditions.add_argument("--block-manifest",required=True,help="JSON mapping each block ID to its seed and partition/evaluation hashes")
+    conditions.add_argument("--blocks",nargs="+",default=list(map(str,range(5))))
+    conditions.add_argument("--metric",default="value")
+    conditions.add_argument("--scale",type=float,default=1.,help="Use 100 for AP differences in percentage points")
     energy=sub.add_parser("energy",help="Measured five-device energy over actual round boundaries")
     energy.add_argument("--power",nargs="+",required=True)
     energy.add_argument("--rounds",required=True)
     energy.add_argument("--interval",type=float,required=True,help="Actual declared recording cadence in seconds")
     energy.add_argument("--gap-tolerance",type=float,default=.5)
-    latency=sub.add_parser("latency",help="Node P95 from200 requests each, then worst of four nodes")
+    latency=sub.add_parser("latency",help="Worst-client P95 (default: 200 requests per node)")
     latency.add_argument("--csv",required=True)
     latency.add_argument("--samples-per-node",type=int,default=200)
     process=sub.add_parser("process",help="Distinct retained/selected RTA and separate process ratios")
     process.add_argument("--run",required=True)
-    for command in (summary,exposure,factorial,energy,latency,process):
+    for command in (summary,paired,exposure,factorial,conditions,energy,latency,process):
         command.add_argument("--out",required=True)
     return p
 
@@ -51,6 +65,10 @@ def main(argv=None):
     args=parser().parse_args(argv)
     if args.command=="summary":
         result=analyze_run_dirs(args.runs,expected_seeds=args.seeds)
+    elif args.command=="paired":
+        block_manifest=json.loads(Path(args.block_manifest).read_text(encoding="utf-8-sig"))
+        result=paired_method_summary(read_jsonl(args.records),block_manifest,args.methods,args.reference,
+                                     args.metric,args.blocks,args.scale)
     elif args.command=="exposure":
         result=compare_exposure(read_jsonl(_round_path(args.left)),read_jsonl(_round_path(args.right)))
     elif args.command=="factorial":
@@ -59,6 +77,9 @@ def main(argv=None):
             raise ValueError("definitions must explicitly describe A/B/C on and off executed operations")
         result=factorial_contrasts(read_jsonl(args.records),args.metric,args.seeds,args.scale)
         result["operation_definitions"]=definitions
+    elif args.command=="conditions":
+        block_manifest=json.loads(Path(args.block_manifest).read_text(encoding="utf-8-sig"))
+        result=condition_contrasts(read_jsonl(args.records),block_manifest,args.metric,args.blocks,args.scale)
     elif args.command=="energy":
         measured=read_power_csv(args.power)
         result=integrate_round_energy(measured["rows"],read_jsonl(_round_path(args.rounds)),

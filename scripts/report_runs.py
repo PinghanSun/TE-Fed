@@ -1,4 +1,4 @@
-"""Audit completed runs and draw figures from explicit measured inputs."""
+"""Audit run records and generate figures."""
 from __future__ import annotations
 
 import argparse

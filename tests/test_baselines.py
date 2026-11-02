@@ -106,7 +106,7 @@ class NumpyBaselineTests(unittest.TestCase):
             adaptive_aggregation_weights([[1, 0], [0, 1]], [2, 0])
 
     def test_policy_schedules_and_method_switches(self):
-        self.assertEqual(len(METHOD_REGISTRY), 11)
+        self.assertEqual(len(METHOD_REGISTRY), 12)
         self.assertAlmostEqual(fsslod_ema_decay(0, 0), 0.99)
         self.assertAlmostEqual(fsslod_ema_decay(29, 1), 0.999)
         self.assertLess(fsslod_ema_decay(12, 1), fsslod_ema_decay(13, 0))

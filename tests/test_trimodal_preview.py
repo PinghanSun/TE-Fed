@@ -98,7 +98,7 @@ class TrimodalPreviewTests(unittest.TestCase):
             depth_display = np.array(image)
         with Image.open(self.output / 'nir_display.png') as image:
             nir_display = np.array(image)
-        # These endpoints distinguish fixed supplied limits from per-image scaling.
+        # Check fixed display limits against per-image scaling.
         np.testing.assert_array_equal(depth_display[0, 0], [0, 0, 0])
         np.testing.assert_array_equal(depth_display[0, 1], self.palette[0])
         np.testing.assert_array_equal(depth_display[0, 4], self.palette[-1])

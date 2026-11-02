@@ -16,8 +16,8 @@ import traceback
 
 
 VIEWS = {"participating", "unseen", "new-client", "hard"}
-PSEUDO_METHODS = {"confidence", "consistent_teacher_fedawa", "fedsto", "fsslod"}
-TEACHER_METHODS = PSEUDO_METHODS - {"confidence"}
+PSEUDO_METHODS = {"confidence", "consistent_teacher_fedawa", "fedsto", "fsslod", "proxyfl"}
+TEACHER_METHODS = {"consistent_teacher_fedawa", "fedsto", "fsslod"}
 
 
 def require(condition, message):
@@ -115,6 +115,12 @@ def validate_rounds(rows, method, policies, clients, rounds, epochs):
             if method in TEACHER_METHODS:
                 require(local.get("consistency_pairs", 0) > 0, f"Consistency path was not exercised: {method}")
                 require(local.get("teacher_updates") == successful, "Client teacher updates differ from successful steps")
+            if method == 'proxyfl':
+                proxy = local.get('proxyfl', {})
+                require(proxy.get('batches', 0) > 0 and proxy.get('anchor_count', 0) > 0,
+                        'ProxyFL local pool objective was not exercised')
+                require(aggregation.get('proxy_tuning', {}).get('classifier_count') == 6,
+                        'ProxyFL did not tune both native classifier branches')
             if method == "fedsto":
                 stages = local.get("stage_history", [])
                 require([stage.get("epoch_index") for stage in stages] == list(range(epochs)), "FedSTO stage history is incomplete")
@@ -141,7 +147,7 @@ def validate_summary(summary):
 
 @contextmanager
 def observe_baseline_calls():
-    """Count real helper calls without changing their return values or arguments."""
+    """Record helper calls and their results."""
     from tefed import baselines
     names = ("update_ema_teacher", "fedsto_set_trainable", "proximal_penalty", "elastic_penalty", "orthogonality_penalty")
     originals = {name: getattr(baselines, name) for name in names}
@@ -212,6 +218,12 @@ def verify_run(result, method, requested_config, evidence, observed_calls):
         require(file_sha256(path) == expected_hash, f"Bound input changed: {path}")
     write_json(evidence / "input_configuration_binding.json", binding)
     aggregation_state = snapshot.get("aggregation_state")
+    if method == 'proxyfl':
+        require(isinstance(aggregation_state, dict) and aggregation_state.get('client_ids') == clients,
+                'Missing persisted ProxyFL class prior')
+        require(aggregation_state.get('class_prior') == rows[-1]['aggregation'].get('class_prior'),
+                'ProxyFL class prior differs from final aggregation')
+        finite_tree(aggregation_state, 'aggregation_state')
     if policies[0]["aggregation"] == "fedawa_paper":
         require(isinstance(aggregation_state, dict) and aggregation_state.get("client_ids") == clients,
                 "Missing persisted FedAWA client ordering")
@@ -318,6 +330,7 @@ def main(argv=None):
     base["model"]["architecture"] = tiny_architecture()
     default_policies = {method: policy_schedule(method, base) for method in methods}
     base["baselines"] = {method: {"pseudo_threshold": 0.0} for method in sorted(PSEUDO_METHODS)}
+    base["baselines"]["proxyfl"].update(proposal_floor=0.0, server_steps=2)
     if args.fedawa_mode == "fedawa_paper":
         require("consistent_teacher_fedawa" in methods, "--fedawa-mode requires consistent_teacher_fedawa")
         base["baselines"]["consistent_teacher_fedawa"]["aggregation_mode"] = args.fedawa_mode

@@ -1,4 +1,4 @@
-"""Freeze private correction cases and bind strict exposure counts."""
+"""Freeze correction cases and record exposure counts."""
 from __future__ import annotations
 
 import argparse

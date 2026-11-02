@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 import torch
 
 from .data import SampleRecord, load_sample, map_boxes
-from .engine import apply_input_policy, assess_frame, load_checkpoint, write_json
+from .engine import apply_input_policy, assess_frame, load_checkpoint, validate_class_names, write_json
 from .state import validate_state
 
 
@@ -44,7 +44,7 @@ def _names(value, count):
     if value is None:
         return {}
     if isinstance(value, (str, Path)):
-        value = json.loads(_file(value, 'class names').read_text(encoding='utf-8'))
+        value = json.loads(_file(value, 'class names').read_text(encoding='utf-8-sig'))
     if not isinstance(value, Mapping):
         raise ValueError('class_names must be a JSON object mapping class IDs to names')
     result = {}
@@ -59,6 +59,19 @@ def _names(value, count):
             raise ValueError('class_names values must be nonempty strings')
         result[index] = name.strip()
     return result
+
+
+def prediction_names(explicit,model_config):
+    """Use stored class names and reject conflicting display labels."""
+    count=int(model_config.get('classes',2))
+    supplied=_names(explicit,count)
+    recorded=model_config.get('class_names')
+    if recorded is None:
+        return supplied
+    stored=dict(enumerate(validate_class_names(recorded,count,'checkpoint model.class_names')))
+    if any(name!=stored[index] for index,name in supplied.items()):
+        raise ValueError('class_names conflicts with the checkpoint class-ID order')
+    return stored
 
 
 def _check_nir(path):
@@ -101,11 +114,10 @@ def _draw(rgb, predictions, path, threshold, names):
 
 def run_inference(checkpoint, calibration, rgb, depth, nir, sample_id, client_id,
                   output, device='cpu', display_confidence=.25, class_names=None, round_id=0):
-    """Write predictions and a display overlay; no training, state update or GT metrics.
+    """Run frozen inference and write predictions plus an RGB overlay.
 
-    Input modalities must already be registered and use the checkpoint's training
-    preprocessing. ``display_confidence`` filters only the overlay. All candidates
-    returned by the existing evaluator's assessment path remain in predictions.json.
+    Inputs use registered training formats. display_confidence filters only
+    the overlay; predictions.json retains all assessment candidates.
     """
     sample_id, client_id = str(sample_id).strip(), str(client_id).strip()
     if not sample_id or not client_id:
@@ -123,7 +135,7 @@ def run_inference(checkpoint, calibration, rgb, depth, nir, sample_id, client_id
     if any(destination == path or destination in path.parents for path in paths.values()):
         raise ValueError('Output directory must not contain or overwrite input files')
     _check_nir(paths['nir'])
-    artifact = json.loads(paths['calibration'].read_text(encoding='utf-8'))
+    artifact = json.loads(paths['calibration'].read_text(encoding='utf-8-sig'))
     if not isinstance(artifact, dict):
         raise ValueError('calibration must contain a JSON object')
     temperature = artifact.get('T_C')
@@ -145,7 +157,7 @@ def run_inference(checkpoint, calibration, rgb, depth, nir, sample_id, client_id
     frozen_state = deepcopy(state)
     states_before = deepcopy(states)
     config.setdefault('experiment', {})['device'] = str(device)
-    names = _names(class_names, int(config['model'].get('classes', 2)))
+    names = prediction_names(class_names,config['model'])
     record = SampleRecord(sample_id, client_id, 'unlabeled', paths['rgb'], paths['depth'], paths['nir'])
     sample = load_sample(record, size=config['model'].get('image_size', 640),
                          require_modalities=('depth', 'nir'), include_labels=False)

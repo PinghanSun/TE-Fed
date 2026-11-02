@@ -89,7 +89,7 @@ class ResumeTests(unittest.TestCase):
             repeated=engine.run_experiment(config,output_dir=output,resume=output/'resume.pt')
             constructor.assert_not_called()
             self.assertEqual(repeated['metrics'],resumed['metrics'])
-        self.assertEqual((output/'rounds.jsonl').read_text().count('"round_index"'),2)
+        self.assertEqual(len(rows),2)
         changed=deepcopy(config)
         changed['loss']['gamma']=.123
         with self.assertRaisesRegex(ValueError,'Resume protocol'):
@@ -171,7 +171,7 @@ class RendererBindingTests(unittest.TestCase):
             config['renderer']={'blender':sys.executable,'scene':str(scene),'enabled':True}
             config['decision']['render_budget']=1
             baseline=self.binding(config)
-            default=Path(engine.__file__).resolve().parents[2]/'scripts'/'blender_render.py'
+            default=Path(engine.__file__).resolve().parent/'blender_scripts'/'blender_render.py'
             self.assertIn(str(default),baseline['input_files'])
             self.assertIn(str(Path(sys.executable).resolve()),baseline['input_files'])
             custom=root/'custom_render.py';custom.write_text('first version')

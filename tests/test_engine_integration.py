@@ -129,7 +129,7 @@ class NativeEngineIntegrationTests(unittest.TestCase):
         calibration = json.loads(Path(self.config["experiment"]["calibration"]).read_text(encoding="utf-8"))
         state = deepcopy(calibration["state_prior"])
         original_state = deepcopy(state)
-        assessment = engine.assess_frame(model, router, sample, state, calibration, self.config, round_id=2)
+        assessment = engine.assess_frame(model, router, sample, state, calibration, self.config, round_id=1)
         self.assertIn("candidates", assessment)
         self.assertEqual(state, original_state)
         self.assertTrue(all(p.grad is None for p in model.parameters()))

@@ -1,0 +1,32 @@
+{
+  "dataset": "DroneVehicle",
+  "original_source": "https://github.com/VisDrone/DroneVehicle",
+  "mirror": "https://huggingface.co/datasets/McCheng/DroneVehicle",
+  "mirror_revision": "947bd13f002857eb79a3e5b4feb2c6aca453ade7",
+  "archive_url": "https://huggingface.co/datasets/McCheng/DroneVehicle/resolve/947bd13f002857eb79a3e5b4feb2c6aca453ade7/val.zip",
+  "split": "validation",
+  "license": null,
+  "sample_id": "00001",
+  "original_files": [
+    {
+      "zip_member": "val/valimgr/00001.jpg",
+      "bytes": 207577,
+      "sha256": "c7f3e6345cd8b2f51028ad9a4856a3d797a05209f2cd4c54874c1762b1dd554b",
+      "role": "IR image stored as three equal channels"
+    },
+    {
+      "zip_member": "val/valimg/00001.jpg",
+      "bytes": 209662,
+      "sha256": "0c157473a897b4918a148aa8edf68badc515533d3892938bcc973000e1f3197b",
+      "role": "RGB image"
+    },
+    {
+      "zip_member": "val/vallabel/00001.xml",
+      "bytes": 5014,
+      "sha256": "328f3a8574f9f625130efff04fd3f4134f6ae21446cdc1cb14357c1b25f1f18f",
+      "role": "RGB-side original polygon annotation"
+    }
+  ],
+  "preprocessing": "RGB JPEG decoded to PNG; IR channels verified equal and channel 0 preserved as uint8 PNG; original border and coordinates retained.",
+  "class_ids": "Declared by class_map.json for this input example."
+}

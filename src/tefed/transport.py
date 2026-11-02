@@ -157,6 +157,21 @@ def unpack_payload(body):
 
 def shared_config_digest(config):
     value = deepcopy(config)
+    model = value.get('model', {})
+    names = model.get('class_names')
+    if names is None:
+        from pathlib import Path
+        manifest = value.get('experiment', {}).get('manifest')
+        if manifest and Path(manifest).is_file():
+            from .data import load_manifest
+            names = load_manifest(manifest, strict_files=False).metadata.get('class_names')
+    if names is not None:
+        count = model.get('classes', 2)
+        if (not isinstance(names, list) or len(names) != count
+                or any(not isinstance(name, str) or not name.strip() for name in names)
+                or len(set(names)) != len(names)):
+            raise ValueError('Shared class_names must match model.classes in class-ID order')
+        value.setdefault('model', {})['class_names'] = list(names)
     value.pop('_config_path', None)
     value.pop('communication', None)
     value.pop('replay', None)

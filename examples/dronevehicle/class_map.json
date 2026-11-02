@@ -1,0 +1,7 @@
+{
+  "car": 0,
+  "truck": 1,
+  "bus": 2,
+  "van": 3,
+  "freight_car": 4
+}

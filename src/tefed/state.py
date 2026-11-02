@@ -93,7 +93,7 @@ def _pseudo_raw(stats: Mapping[str, Any]) -> float | None:
     if valid_count > assessed or qualified > valid_count:
         raise ValueError("inconsistent valid_candidate_count")
     if assessed == 0 or valid_count == 0:
-        # Preserve p when all cues are undefined; the paper gives no estimator.
+        # Preserve p when all cues are unavailable.
         return None
     reliability = _unit(_get(stats, "mean_r", "mean_R"), "mean_r")
     consistency = _unit(_get(stats, "mean_s", "mean_S"), "mean_s")

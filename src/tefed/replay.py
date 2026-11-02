@@ -40,6 +40,25 @@ def _training_binding(config):
     return canonical_hash(resolved)
 
 
+def _training_binding_matches(config, expected, manifest_sha256):
+    if _training_binding(config) == expected:
+        return True
+    names = config.get('model', {}).get('class_names')
+    if names is None:
+        return False
+    manifest_path = Path(config['experiment']['manifest']).expanduser()
+    if file_hash(manifest_path) != manifest_sha256:
+        return False
+    from .data import load_manifest
+    manifest = load_manifest(manifest_path, strict_files=False)
+    if names != manifest.metadata.get('class_names'):
+        return False
+    # An older reference may predate checkpoint label metadata.
+    original = deepcopy(config)
+    original['model'].pop('class_names')
+    return _training_binding(original) == expected
+
+
 def freeze_pool(cases, source_states, directory, *, provenance=None):
     """Copy private assets into a new content-bound pool directory."""
     directory = Path(directory).expanduser().resolve()
@@ -243,7 +262,8 @@ class ReplayController:
             raise ValueError('Replay pool, participating clients or rounds differ from the protocol')
         if artifact_bindings(config) != self.protocol['bindings']:
             raise ValueError('Replay data, calibration or initial checkpoint differs from the protocol')
-        if _training_binding(config) != self.protocol['training_configuration_sha256']:
+        if not _training_binding_matches(config, self.protocol['training_configuration_sha256'],
+                                         self.protocol['bindings']['manifest_sha256']):
             raise ValueError('Replay training configuration differs from the exposure reference')
         if seed not in self.protocol['seed_ids']:
             raise ValueError('Replay seed is not declared by the exposure protocol')

@@ -16,6 +16,7 @@ from . import core
 from .cues import extract_cues
 from .state import FAMILIES
 from .diagnostics import renderer_target_observation
+from .rendering import tomato_class_map
 
 
 def _services(config):
@@ -280,6 +281,9 @@ def construct_cases(descriptors,model,router,source_states,participating_clients
                  "image_size":int(config.get("model",{}).get("image_size",640))}
         if config.get("renderer",{}).get("scene_class_map") is not None:
             request["scene_class_map"]=deepcopy(config["renderer"]["scene_class_map"])
+        elif config.get('task','tomato')=='tomato':
+            request['tomato_class_map']=tomato_class_map(config.get('model',{}).get('class_names'),
+                                                       config.get('renderer',{}).get('tomato_class_map'))
         if calibration.get("luminance_median") is not None:
             request["descriptor"]={**rendering_d,"calibration":{"luminance_median":calibration["luminance_median"]}}
         response=renderer.render(request,folder)
@@ -435,8 +439,9 @@ def _native_losses(model,sample,config):
 def update_router(model,router,manifest,pool,source_states,client_states,calibration,config,round_index,*,descriptors=()):
     """Update the router after aggregation using validation and retained cases.
 
-    Use three photometric variants, up to 32 retained cases and 24 descriptors.
-    Calibration uses the first annotation; test IDs are excluded."""
+    Use three photometric views; default caps are 32 cases and 24 descriptors.
+    Calibration uses the first annotation; test IDs are excluded.
+    """
     import torch
     from .data import load_sample
     from .engine import apply_input_policy

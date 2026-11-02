@@ -10,6 +10,31 @@ from pathlib import Path
 from typing import Any
 
 
+def tomato_class_map(class_names=None, explicit=None):
+    """Resolve fruit semantics without changing prediction class IDs."""
+    inferred = None
+    if class_names is not None:
+        if (not isinstance(class_names, list) or len(class_names) != 2
+                or any(not isinstance(name, str) or not name.strip() for name in class_names)):
+            raise ValueError('Tomato class_names must contain two names')
+        labels = [name.strip().lower().replace('_', '-') for name in class_names]
+        if set(labels) == {'ripe', 'non-ripe'}:
+            inferred = {name: labels.index(name) for name in ('ripe', 'non-ripe')}
+    if explicit is not None:
+        if (not isinstance(explicit, dict) or set(explicit) != {'ripe', 'non-ripe'}
+                or any(type(value) is not int for value in explicit.values())
+                or set(explicit.values()) != {0, 1}):
+            raise ValueError('tomato_class_map must map ripe and non-ripe to distinct IDs 0 and 1')
+        if inferred is not None and explicit != inferred:
+            raise ValueError('tomato_class_map conflicts with model.class_names')
+        return dict(explicit)
+    if inferred is not None:
+        return inferred
+    if class_names is not None:
+        raise ValueError('Set renderer.tomato_class_map for custom Tomato class names')
+    return {'ripe': 0, 'non-ripe': 1}
+
+
 class BlenderRenderer:
     def __init__(
         self,
@@ -32,11 +57,11 @@ class BlenderRenderer:
         if not isinstance(samples, int) or isinstance(samples, bool) or not 1 <= samples <= 128:
             raise ValueError("samples must be an integer in [1, 128]")
         self.samples = samples
-        project_root = Path(__file__).resolve().parents[2]
-        self.script_path = Path(script_path or project_root / "scripts" / "blender_render.py").resolve()
+        scripts = Path(__file__).resolve().with_name("blender_scripts")
+        self.script_path = Path(script_path or scripts / "blender_render.py").expanduser().resolve()
         if not self.script_path.is_file():
             raise FileNotFoundError(f"Blender rendering script not found: {self.script_path}")
-        self.generic_script_path = Path(generic_script_path or project_root / "scripts" / "blender_generic_render.py").resolve()
+        self.generic_script_path = Path(generic_script_path or scripts / "blender_generic_render.py").expanduser().resolve()
 
     def render(self, request: dict[str, Any], output_dir: Path) -> dict[str, Any]:
         """Render aligned images, targets, and measurements into a fresh directory.
@@ -55,6 +80,7 @@ class BlenderRenderer:
             raise ValueError("descriptor attributes must be finite numbers in [0, 1]")
         source_class = descriptor.get("source_class")
         class_map = request.get("scene_class_map")
+        tomato_map = None
         if class_map is not None:
             if not isinstance(class_map, dict) or not class_map or any(not isinstance(k, str) or not k.strip() or not isinstance(v, int) or isinstance(v, bool) or v < 0 for k, v in class_map.items()):
                 raise ValueError("scene_class_map must map nonempty object/collection root names to nonnegative integer classes")
@@ -64,6 +90,8 @@ class BlenderRenderer:
                 raise FileNotFoundError(f"Generic rendering script not found: {self.generic_script_path}")
         elif not isinstance(source_class, int) or isinstance(source_class, bool) or source_class not in (0, 1):
             raise ValueError("tomato renderer supports source_class 0/1; other classes require scene_class_map")
+        else:
+            tomato_map = tomato_class_map(explicit=request.get('tomato_class_map'))
         seed = request.get("seed")
         if not isinstance(seed, int) or isinstance(seed, bool) or not 0 <= seed < 2**32:
             raise ValueError("seed must be a uint32 integer")
@@ -87,6 +115,8 @@ class BlenderRenderer:
             raise FileExistsError(f"Render output directory must be empty: {out}")
         payload = dict(request)
         payload.update(scene_path=str(scene), image_size=list(image_size), samples=self.samples)
+        if tomato_map is not None:
+            payload['tomato_class_map'] = tomato_map
         payload["descriptor"] = dict(descriptor, attrs=list(attrs))
         request_path, response_path = out / "request.json", out / "response.json"
         request_path.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")

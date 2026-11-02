@@ -1,0 +1,72 @@
+{
+  "task": "dronevehicle",
+  "sample_id": "00001",
+  "client_id": "client1",
+  "source_split": "validation",
+  "image_size": [
+    840,
+    712
+  ],
+  "files": {
+    "rgb": {
+      "path": "inputs/rgb.png",
+      "sha256": "09a13d12d1ee7ba37e86026cd0d62b98358e60cc87d9f2c1a2b96848a31bf9b3",
+      "dtype": "uint8",
+      "shape": [
+        712,
+        840,
+        3
+      ]
+    },
+    "ir": {
+      "path": "inputs/ir.png",
+      "sha256": "97c27184ee5d11219f69ce15815326a4bba155bdb5ebbc62610820e64d7bdebb",
+      "dtype": "uint8",
+      "shape": [
+        712,
+        840
+      ]
+    }
+  },
+  "class_names": [
+    "car",
+    "truck",
+    "bus",
+    "van",
+    "freight_car"
+  ],
+  "source_files": {
+    "rgb": {
+      "filename": "00001.png",
+      "sha256": "09a13d12d1ee7ba37e86026cd0d62b98358e60cc87d9f2c1a2b96848a31bf9b3"
+    },
+    "ir": {
+      "filename": "00001.png",
+      "sha256": "97c27184ee5d11219f69ce15815326a4bba155bdb5ebbc62610820e64d7bdebb"
+    },
+    "annotation": {
+      "filename": "00001.xml",
+      "sha256": "328f3a8574f9f625130efff04fd3f4134f6ae21446cdc1cb14357c1b25f1f18f"
+    },
+    "class_map": {
+      "filename": "class_map.json",
+      "sha256": "83f43dfcbbc4ae10b643bf0cc951cfaa8ed3af524d05f953dce91bad8bd25b96"
+    },
+    "class_aliases": {
+      "filename": "class_aliases.json",
+      "sha256": "f554c921e059dc2bcc750db72b652450888eddefa8668cb2412dc37a287811f5"
+    }
+  },
+  "preprocessing": {
+    "rgb": "decode RGB pixels and encode lossless PNG",
+    "ir": "preserve uint8 samples",
+    "crop": "none",
+    "registration": "unchanged",
+    "class_aliases": {
+      "feright car": "freight_car",
+      "feright_car": "freight_car",
+      "freight car": "freight_car"
+    }
+  },
+  "inference_executed": false
+}

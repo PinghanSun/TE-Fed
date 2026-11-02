@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -165,6 +166,8 @@ def file_journal(output,previous=None,round_index=None,completed=False):
     paths+=append_paths
     if round_index is not None:
         paths.append(output/f'verification_round_{round_index:03d}.json')
+        checkpoint=output/'checkpoints'/f'round_{round_index+1:06d}.pt'
+        paths.extend((checkpoint,checkpoint.with_suffix('.pool.json')))
         for directory in ('rendering','monitoring'):
             paths+=list((output/directory/f'round_{round_index:03d}').rglob('*'))
     if completed:
@@ -194,6 +197,18 @@ def reconcile_files(output,journal,next_round,completed=False):
         raise ValueError('Committed round ledger is not contiguous')
     if completed:
         return
+    checkpoints=output/'checkpoints'
+    if checkpoints.exists() or checkpoints.is_symlink():
+        if checkpoints.is_symlink() or not checkpoints.resolve().is_relative_to(output):
+            raise ValueError('Unsafe unfinished checkpoint directory')
+        for path in checkpoints.iterdir():
+            match=re.fullmatch(r'round_(\d{6,})\.(?:pt|pool\.json)(?:\.tmp)?',path.name)
+            if match is None or int(match.group(1))<=next_round:
+                continue
+            if path.is_symlink() or not path.resolve().is_relative_to(checkpoints.resolve()) or not path.is_file():
+                raise ValueError(f'Unsafe unfinished checkpoint file: {path}')
+            if path.relative_to(output).as_posix() not in journal:
+                path.unlink()
     for path in _append_paths(output):
         if path.is_file():
             record=journal.get(path.relative_to(output).as_posix())

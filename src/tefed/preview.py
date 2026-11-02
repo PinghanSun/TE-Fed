@@ -1,4 +1,4 @@
-"""Preview aligned input images without loading a detector or changing raw data."""
+"""Generate Tomato and DroneVehicle input previews."""
 from __future__ import annotations
 
 import argparse
@@ -51,12 +51,14 @@ def _read_input(example_dir, spec, name):
         image.load()
         array = np.array(image)
         mode = image.mode
-    # Some Pillow versions expose 16-bit PNG samples as int32. The PNG header
-    # records the original bit depth, independently of the in-memory dtype.
+    # Read PNG bit depth from its header; Pillow may expose uint16 as int32.
     bit_depth = payload[24]
     if name == 'rgb':
         if bit_depth != 8 or array.dtype != np.uint8 or array.ndim != 3 or array.shape[2] != 3:
             raise ValueError('RGB must be an 8-bit, three-channel PNG')
+    elif name == 'ir':
+        if bit_depth != 8 or array.dtype != np.uint8 or array.ndim != 2:
+            raise ValueError('IR must be an 8-bit, single-channel PNG')
     else:
         if bit_depth != 16 or array.ndim != 2 or not np.issubdtype(array.dtype, np.integer):
             raise ValueError(f'{name} must be a single-channel, 16-bit PNG')
@@ -118,12 +120,11 @@ def _display(array, spec, name, palette):
 
 
 def preview_example(example_dir, output_dir):
-    """Write an input preview using the example's fixed display limits.
+    """Write a preview with fixed display limits, preserving the original inputs.
 
-    The output directory must be new. RGB is copied byte for byte; Depth and
-    NIR are read as uint16 and never rewritten. Display colors are unrelated to
-    model input preprocessing. No checkpoint, training code or torch is loaded.
-    The returned summary has absolute paths; preview.json uses portable names.
+    RGB is copied byte for byte. Tomato depth/NIR use fixed display limits;
+    DroneVehicle IR retains its uint8 values. Return absolute paths and store
+    portable names in preview.json. The output directory must be new.
     """
     example = Path(example_dir).expanduser().resolve()
     if not example.is_dir():
@@ -137,42 +138,51 @@ def preview_example(example_dir, output_dir):
     manifest = json.loads(manifest_path.read_text(encoding='utf-8-sig'))
     if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), dict):
         raise ValueError('Manifest must contain a files object')
+    task = manifest.get('task', 'tomato')
+    if task not in ('tomato', 'dronevehicle'):
+        raise ValueError(f'Unsupported example task: {task!r}')
+    names = ('rgb', 'ir') if task == 'dronevehicle' else ('rgb', 'depth', 'nir')
     arrays, sources, rgb_bytes = {}, {}, None
-    for name in ('rgb', 'depth', 'nir'):
+    for name in names:
         array, payload, details = _read_input(example, manifest['files'].get(name), name)
         arrays[name], sources[name] = array, details
         if name == 'rgb':
             rgb_bytes = payload
     height, width = arrays['rgb'].shape[:2]
     if any(array.shape[:2] != (height, width) for array in arrays.values()):
-        raise ValueError('RGB, Depth and NIR dimensions must match')
+        raise ValueError('Input image dimensions must match')
     if manifest.get('image_size') != [width, height]:
         raise ValueError('Manifest image_size must match the input width and height')
-    mappings = manifest.get('display_mappings')
+    mappings = manifest.get('display_mappings', {} if task == 'dronevehicle' else None)
     if not isinstance(mappings, dict):
         raise ValueError('Manifest must contain fixed display_mappings')
     needs_palette = any(isinstance(mappings.get(name), dict)
                         and mappings[name].get('colormap') == 'viridis'
-                        for name in ('depth', 'nir'))
+                        for name in names[1:])
     palette, palette_source = _palette(example) if needs_palette else (None, None)
-    displays = {name: _display(arrays[name], mappings.get(name), name, palette)
-                for name in ('depth', 'nir')}
+    displays = {'ir': np.repeat(arrays['ir'][:, :, None], 3, axis=2)} if task == 'dronevehicle' else {
+        name: _display(arrays[name], mappings.get(name), name, palette) for name in names[1:]}
+    if task == 'dronevehicle' and mappings:
+        raise ValueError('DroneVehicle previews use the original uint8 IR values')
 
     # Keep all panels at the original resolution; labels sit below the images.
     label_height, gutter = 96, 16
-    labels = ['(a) RGB', '(b) Depth', '(c) NIR']
-    combined_width = 3 * width + 2 * gutter
+    labels = ['(a) RGB', '(b) IR'] if task == 'dronevehicle' else ['(a) RGB', '(b) Depth', '(c) NIR']
+    combined_width = len(names) * width + (len(names) - 1) * gutter
     combined = Image.new('RGB', (combined_width, height + label_height), 'white')
     draw = ImageDraw.Draw(combined)
     font_size = min(64, max(10, width // 5))
     font = ImageFont.load_default(size=font_size)
-    for index, (label, array) in enumerate(zip(labels, (arrays['rgb'], displays['depth'], displays['nir']))):
+    panels = [arrays['rgb'], *(displays[name] for name in names[1:])]
+    for index, (label, array) in enumerate(zip(labels, panels)):
         panel_left = index * (width + gutter)
         combined.paste(Image.fromarray(array), (panel_left, 0))
         left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
         draw.text((panel_left + (width - right + left) / 2,
                    height + (label_height - bottom + top) / 2 - top), label, font=font, fill='black')
-    paths = {name: str(output / filename) for name, filename in _OUTPUT_NAMES.items()}
+    output_names = {'rgb': 'rgb.png', 'ir_display': 'ir_display.png', 'combined': 'rgb_ir.png',
+                    'metadata': 'preview.json'} if task == 'dronevehicle' else _OUTPUT_NAMES
+    paths = {name: str(output / filename) for name, filename in output_names.items()}
     summary = {
         'display_only': True,
         'inference_executed': False,
@@ -192,7 +202,8 @@ def preview_example(example_dir, output_dir):
         'label_font_size': font_size,
         'gutter_width': gutter,
         'display_mappings': mappings,
-        'mapping_applied': 'clip((value-vmin)/(vmax-vmin),0,1); round to 0..255; set zero pixels to black',
+        'mapping_applied': 'original uint8 IR values repeated across RGB channels' if task == 'dronevehicle' else
+                           'clip((value-vmin)/(vmax-vmin),0,1); round to 0..255; set zero pixels to black',
         'display_palette': palette_source,
         'outputs': paths,
     }
@@ -200,12 +211,12 @@ def preview_example(example_dir, output_dir):
     output.mkdir(parents=True, exist_ok=False)
     with Path(paths['rgb']).open('xb') as stream:
         stream.write(rgb_bytes)
-    for name in ('depth', 'nir'):
+    for name in names[1:]:
         with Path(paths[f'{name}_display']).open('xb') as stream:
             Image.fromarray(displays[name]).save(stream, format='PNG')
     with Path(paths['combined']).open('xb') as stream:
         combined.save(stream, format='PNG')
-    # Keep the saved record portable while returning absolute paths to callers.
+    # Store relative paths in preview.json.
     portable = deepcopy(summary)
     portable['example_dir'] = 'Directory supplied with --example; source paths are relative to that directory.'
     portable['source_manifest'] = 'manifest.json'
@@ -213,7 +224,7 @@ def preview_example(example_dir, output_dir):
         spec.pop('resolved_path', None)
     if portable['display_palette'] is not None:
         portable['display_palette']['path'] = 'display_palette.json'
-    portable['outputs'] = dict(_OUTPUT_NAMES)
+    portable['outputs'] = dict(output_names)
     with Path(paths['metadata']).open('x', encoding='utf-8', newline='\n') as stream:
         json.dump(portable, stream, ensure_ascii=False, indent=2, allow_nan=False)
         stream.write('\n')
