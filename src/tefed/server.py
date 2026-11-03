@@ -85,20 +85,8 @@ def _load_case(case,config):
     conversion=case.get("depth_unit_conversion",case.get("depth_scale"))
     sample["depth_scale"]=normalizer
     sample["depth_unit_conversion"]=conversion
-    if conversion is None:
-        sample["depth"]=None
-        sample["depth_units_status"]="unknown_scene_conversion_depth_omitted"
-    else:
-        conversion=float(conversion)
-        if not np.isfinite(conversion) or conversion<=0:
-            raise ValueError("depth_unit_conversion must be positive")
-        applied=sample.get("_depth_unit_conversion_applied")
-        if applied is not None and not np.isclose(float(applied),conversion,rtol=0.,atol=1e-12):
-            raise ValueError("sample was already converted using a different depth unit factor")
-        if sample.get("depth") is not None and applied is None:
-            sample["depth"]=np.asarray(sample["depth"])*conversion
-        sample["_depth_unit_conversion_applied"]=conversion
-        sample["depth_units_status"]="converted_to_dataset_units"
+    from .depth import convert_rendered_depth
+    sample=convert_rendered_depth(sample,conversion)
     return apply_input_policy(sample,config)
 
 
@@ -279,6 +267,8 @@ def construct_cases(descriptors,model,router,source_states,participating_clients
         request={"descriptor":rendering_d,"seed":seed,"case_id":case_id,
                  "specialist_id":specialist,"variant_index":index,
                  "image_size":int(config.get("model",{}).get("image_size",640))}
+        if "scene_meters_per_unit" in config.get("renderer",{}):
+            request["scene_meters_per_unit"]=config["renderer"]["scene_meters_per_unit"]
         if config.get("renderer",{}).get("scene_class_map") is not None:
             request["scene_class_map"]=deepcopy(config["renderer"]["scene_class_map"])
         elif config.get('task','tomato')=='tomato':

@@ -71,12 +71,14 @@ prediction_confidence = 0.01
 max_detections = 100
 
 [baselines.confidence]
+supervised_rounds = 5
 pseudo_threshold = 0.75
 
 [baselines.fedprox]
 proximal_mu = 0.01
 
 [baselines.consistent_teacher_fedawa]
+supervised_rounds = 5
 pseudo_threshold = 0.75
 teacher_decay = 0.999
 consistency_weight = 0.5
@@ -89,10 +91,13 @@ reference_weighting = "uniform"
 pseudo_threshold = 0.75
 teacher_decay = 0.999
 consistency_weight = 0.5
-head_only_epochs = 1
+schedule = "round_stages"
+supervised_rounds = 50
+backbone_only_until = 150
 orthogonal_coefficient = 0.05
 
 [baselines.fsslod]
+supervised_rounds = 5
 pseudo_threshold = 0.75
 teacher_decay_start = 0.99
 teacher_decay_end = 0.999
@@ -100,6 +105,7 @@ consistency_weight = 0.5
 elastic_coefficient = 0.1
 
 [baselines.proxyfl]
+supervised_rounds = 5
 pseudo_threshold = 0.95
 proxy_weight = 1.0
 proposal_floor = 0.05

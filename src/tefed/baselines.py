@@ -19,7 +19,7 @@ METHOD_REGISTRY = {
     "fedbn": "FedAvg with client-local BatchNorm parameters and buffers",
     "confidence": "Fixed-confidence self-training",
     "consistent_teacher_fedawa": "EMA consistency with an explicit adaptive aggregation adaptation",
-    "fedsto": "Round-reset EMA teacher and two-stage local training",
+    "fedsto": "Round-reset EMA teacher with explicit round-stage or legacy local-epoch training",
     "fsslod": "Scheduled EMA teacher with an explicit elastic anchoring adaptation",
     "proxyfl": "Classifier-proxy tuning with possible-class contrastive learning",
     "server_moe": "Routed expert model without rendered correction cases",
@@ -37,7 +37,9 @@ for _method in _TEACHER_METHODS:
 for _method in _EXPERT_METHODS:
     BASELINE_CONFIG_KEYS[_method].add("consistency_weight")
 BASELINE_CONFIG_KEYS["fedprox"].add("proximal_mu")
-BASELINE_CONFIG_KEYS["fedsto"].update({"orthogonal_coefficient", "head_only_epochs"})
+for _method in {"confidence", "proxyfl"} | _TEACHER_METHODS:
+    BASELINE_CONFIG_KEYS[_method].add("supervised_rounds")
+BASELINE_CONFIG_KEYS["fedsto"].update({"orthogonal_coefficient", "head_only_epochs", "schedule", "backbone_only_until"})
 BASELINE_CONFIG_KEYS["fsslod"].update({"elastic_coefficient", "teacher_decay_start", "teacher_decay_end"})
 BASELINE_CONFIG_KEYS["proxyfl"].update({"pseudo_threshold", "proxy_weight", "proposal_floor",
                                         "server_steps", "server_learning_rate", "prior_momentum"})
@@ -65,6 +67,14 @@ def validate_baseline_config(config: Mapping[str, Any] | None = None) -> None:
             name = f"baselines.{method}.{key}"
             if key not in BASELINE_CONFIG_KEYS[method]:
                 raise ValueError(f"Unknown or inapplicable baseline option: {name}")
+            if key == "schedule":
+                if not isinstance(value, str) or value not in {"local_epochs", "round_stages"}:
+                    raise ValueError(f"{name} must be local_epochs or round_stages")
+                continue
+            if key in {"supervised_rounds", "backbone_only_until"}:
+                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                    raise ValueError(f"{name} must be a nonnegative integer")
+                continue
             if key == "reference_weighting":
                 if not isinstance(value, str) or value not in {"uniform", "sample_count"}:
                     raise ValueError(f"{name} must be uniform or sample_count")
@@ -95,6 +105,14 @@ def validate_baseline_config(config: Mapping[str, Any] | None = None) -> None:
                 raise ValueError(f"{name} must lie in [0, 1]")
             if key in {"aggregation_temperature", "aggregation_cap", "fedawa_learning_rate"} and number == 0:
                 raise ValueError(f"{name} must be positive")
+        if method == "fedsto":
+            if overrides.get("schedule", "local_epochs") == "round_stages":
+                if "head_only_epochs" in overrides:
+                    raise ValueError("head_only_epochs cannot be combined with round_stages")
+                if overrides.get("backbone_only_until", 150) <= overrides.get("supervised_rounds", 50):
+                    raise ValueError("backbone_only_until must exceed supervised_rounds")
+            elif "backbone_only_until" in overrides:
+                raise ValueError("backbone_only_until requires round_stages")
         if method == "consistent_teacher_fedawa":
             paper = overrides.get("aggregation_mode", "directional") == "fedawa_paper"
             incompatible = {"aggregation_temperature", "aggregation_cap", "reference_weighting"} if paper else {"fedawa_steps", "fedawa_learning_rate"}
@@ -285,8 +303,8 @@ def elastic_penalty(model, reference, coefficient: float = 0.10):
     return (sum(terms, zero) / len(terms) if terms else zero) * (coefficient / 2)
 
 
-def orthogonality_penalty(model, coefficient: float = 0.05, active_heads: Sequence[int] | None = None):
-    """FedSTO adaptation: penalize normalized Gram matrices of active heads."""
+def orthogonality_penalty(model, coefficient: float = 0.05, active_heads: Sequence[int] | None = None, *, include_neck: bool = False):
+    """Penalize normalized Gram matrices of active heads and optional neck."""
     import torch
     import torch.nn.functional as functional
     coefficient = _nonnegative(coefficient, "coefficient")
@@ -295,6 +313,11 @@ def orthogonality_penalty(model, coefficient: float = 0.05, active_heads: Sequen
         if len(indices) != len(set(indices)) or any(not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(model.heads) for index in indices):
             raise ValueError("active_heads must contain distinct valid head indices")
         parameters = [p for index in indices for p in model.heads[index].parameters()]
+        if include_neck:
+            split = getattr(model, "backbone_layers", None)
+            if split is None:
+                raise ValueError("Neck regularization requires model.backbone_layers")
+            parameters += list(model.trunk[split:].parameters())
     else:
         if active_heads is not None:
             raise ValueError("active_heads requires a model.heads collection")
@@ -338,6 +361,27 @@ def fedsto_set_trainable(model, epoch_index: int, active_heads: Sequence[int] | 
         head.requires_grad_(index in chosen)
         head.train(bool(model.training) and index in chosen)
     return {"freeze_trunk": freeze, "active_heads": sorted(chosen)}
+
+
+def fedsto_round_trainable(model, stage: str, active_heads=None):
+    """Apply primary stages, freezing neck/head BN as well as their gradients."""
+    if stage not in {"supervised", "backbone", "full"}:
+        raise ValueError("Unknown FedSTO round stage")
+    split = getattr(model, "backbone_layers", None)
+    if not isinstance(split, int) or not 0 < split <= len(model.trunk):
+        raise ValueError("Round-stage FedSTO requires the detector backbone/neck split")
+    chosen = list(range(len(model.heads))) if active_heads is None else list(active_heads)
+    fedsto_set_trainable(model, 0, chosen, head_only_epochs=0)
+    frozen = stage == "backbone"
+    for layer in model.trunk[split:]:
+        layer.requires_grad_(not frozen)
+        layer.train(bool(model.training) and not frozen)
+    for index, head in enumerate(model.heads):
+        trainable = index in chosen and not frozen
+        head.requires_grad_(trainable)
+        head.train(bool(model.training) and trainable)
+    return {"stage": stage, "freeze_trunk": False, "freeze_neck": frozen,
+            "freeze_heads": frozen, "active_heads": chosen}
 
 
 def fsslod_ema_decay(round_index: int, epoch_index: int) -> float:
@@ -465,13 +509,23 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
         "use_state_matched_reuse": method in {"generic_hc", "tefed"},
         "is_new_detector_adaptation": True,
     }
-    policy.update({key: value if key in {"reference_weighting", "aggregation_mode", "head_only_epochs", "fedawa_steps"} else float(value)
+    policy.update({key: value if key in {"reference_weighting", "aggregation_mode", "head_only_epochs", "fedawa_steps", "schedule", "supervised_rounds", "backbone_only_until"} else float(value)
                    for key, value in overrides.items() if key not in {"teacher_decay_start", "teacher_decay_end"}})
     if method == 'proxyfl':
         for key, value in {'proxy_weight': 1.0, 'proposal_floor': .05, 'server_steps': 10,
                            'server_learning_rate': .005, 'prior_momentum': .99}.items():
             policy.setdefault(key, value)
         policy['server_steps'] = int(policy['server_steps'])
+    supervised_rounds = int(overrides.get('supervised_rounds', 0))
+    if method == 'fedsto' and overrides.get('schedule') == 'round_stages':
+        supervised_rounds = int(overrides.get('supervised_rounds', 50))
+        stage = 'supervised' if round_index < supervised_rounds else \
+            'backbone' if round_index < overrides.get('backbone_only_until', 150) else 'full'
+        policy.update(fedsto_stage=stage, freeze_trunk=False, head_only_epochs=None,
+                      orthogonal_coefficient=policy['orthogonal_coefficient'] if stage == 'full' else 0.)
+    if round_index < supervised_rounds:
+        policy.update(use_unlabeled=False, consistency_weight=0.)
+    policy['alignment_weight'] = float((config or {}).get('loss', {}).get('rho', .1)) if experts else 0.
     return policy
 
 

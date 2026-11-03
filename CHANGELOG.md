@@ -1,5 +1,14 @@
 # Changes
 
+## Unreleased
+
+- Export float32 axial camera-Z in metres, with scene scale and a depth validity mask.
+- Share one-time rendered-depth conversion between verification and local training, followed by fixed Tomato millimetre-depth normalization.
+- Add FedSTO round stages to the 300-round configurations, including frozen neck/head BN statistics and final-stage neck/head regularization. Retain the separate local-epoch protocol.
+- Apply five-round supervised warm-up to the configured semi-supervised baselines, and keep TE-Fed alignment out of conventional baseline objectives.
+- Summarize request-level P95 by scope and paired block, with nearest-rank quantiles, attempt/failure counts and sample SD.
+- Add regression tests for depth geometry, training-stage boundaries and timing summaries.
+
 ## 2.6.4
 
 - Paired Tomato RGB/depth/NIR and DroneVehicle RGB/IR previews, with local sample extraction.

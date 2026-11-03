@@ -78,3 +78,15 @@ Class-skew experiments use target label fractions of 10% and 25% with Dirichlet 
 | Device energy | `record_power.py` plus `analyze_runs.py energy`: power samples and round boundaries |
 
 `analyze_runs.py latency` computes node-trace quantiles and the worst-client summary. Record the timing scope with each result.
+
+For block-level request traces, use a separate entry point:
+
+```bash
+uv run --locked python scripts/summarize_request_traces.py --csv requests.csv --out runs/request_p95.json
+```
+
+The CSV requires `scope`, `block_id`, `request_id`, `phase`, `status` and `latency_ms`. Set `phase` to `warmup` or `timed`, and `status` to `success`, `failure` or `timeout`. Successful timed requests require a finite nonnegative latency in milliseconds. Give distinct scopes, such as `forward` and `workflow`, separate names.
+
+Within each block and scope, P95 is the nearest-rank value at `ceil(0.95*n)` among successful timed requests. Warm-ups are excluded and failures/timeouts are counted separately. The output reports attempt counts and summarizes block P95s using mean and sample SD. A block with no successful timed requests has an undefined P95 and remains listed in the output.
+
+For the 50-warm-up/1000-attempt protocol, check the reported counts for every block. The summarizer accepts other trace lengths and does not infer missing requests. Keep this analysis separate from the existing 200-request node-registry quantile calculation. This command summarizes recorded traces. It does not collect timing measurements.
