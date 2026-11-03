@@ -71,6 +71,9 @@ def validate_run_config(config):
     if config.get('communication',{}).get('mode','local') not in {'local','http'}:
         raise ValueError('communication.mode must be local or http')
     experiment = config.get('experiment', {})
+    schedule_rounds = experiment.get('schedule_rounds', experiment.get('rounds', 30))
+    if isinstance(schedule_rounds, bool) or not isinstance(schedule_rounds, int) or schedule_rounds < 1:
+        raise ValueError('experiment.schedule_rounds must be a positive integer')
     for key, default in [('rounds', 30), ('local_epochs', 2), ('batch_size', 4)]:
         value = experiment.get(key, default)
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -403,18 +406,11 @@ def _head_weights(item,head):
 
 
 def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,reference=None,proxy_prior=None):
-    from .baselines import policy_dict,update_ema_teacher,fedsto_set_trainable,fedsto_round_trainable,proximal_penalty,elastic_penalty,orthogonality_penalty
+    from .baselines import policy_dict,optimizer_learning_rate,update_ema_teacher,fedsto_set_trainable,fedsto_round_trainable,proximal_penalty,elastic_penalty,orthogonality_penalty
     policies=[policy_dict(method,round_id,epoch,config) for epoch in range(int(config['experiment'].get('local_epochs',2)))]
     device=next(model.parameters()).device
     optimcfg=config.get('optimizer',{})
-    total_rounds=int(config['experiment'].get('rounds',30))
-    warmup=int(optimcfg.get('warmup_rounds',3))
-    initial=float(optimcfg.get('learning_rate',.01)); final=float(optimcfg.get('final_learning_rate',.001))
-    if round_id<warmup:
-        lr=initial*(round_id+1)/max(warmup,1)
-    else:
-        progress=(round_id-warmup)/max(1,total_rounds-warmup-1)
-        lr=final+(initial-final)*(1+math.cos(math.pi*progress))/2
+    lr=optimizer_learning_rate(config,round_id)
     optimizer=torch.optim.SGD(model.parameters(),lr=lr,momentum=optimcfg.get('momentum',.937),weight_decay=optimcfg.get('weight_decay',.0005))
     amp=bool(optimcfg.get('amp',True)) and str(device).startswith('cuda')
     scaler=torch.amp.GradScaler('cuda',enabled=amp,init_scale=float(optimcfg.get('amp_init_scale',65536.)))
@@ -475,7 +471,7 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
                     numerator=len(item.get('candidates',[])) if item['kind']=='pseudo' else 1
                     factor=coefficients[item['kind']]*len(items)*numerator/(counts[item['kind']]+1e-8)
                     loss=detection*factor
-                    if alignment_enabled and targets:
+                    if alignment_enabled and targets and (policy['alignment_scope']=='all' or item['kind']=='labeled'):
                         contrastive_inputs.append(x);contrastive_samples.append(sample)
                     if item['kind']=='pseudo' and consistency_coefficient>0:
                         strong=sample_tensor(_strong_view(sample,round_id*1000+epoch),device,rgb_only=config['model'].get('detector_rgb_only',False))
@@ -531,7 +527,7 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
                     if embeddings is not None:
                         alignment=contrastive_alignment(embeddings,float(losses.get('temperature',.1)),availability=availability)
                         alignment_losses.append(float(alignment.detach()))
-                        auxiliary.append(float(losses.get('rho',.1))*alignment)
+                        auxiliary.append(float(policy['alignment_weight'])*alignment)
                 if consistency_count:
                     consistency=sum(consistency_sums)/consistency_count
                     consistency_losses.append(float(consistency.detach()))

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from math import isfinite
+from math import isfinite, cos, pi
 from numbers import Real
 import re
 from typing import Any, Callable
@@ -33,7 +33,7 @@ BASELINE_CONFIG_KEYS = {method: set() for method in METHOD_REGISTRY}
 for _method in {"confidence"} | _TEACHER_METHODS:
     BASELINE_CONFIG_KEYS[_method].add("pseudo_threshold")
 for _method in _TEACHER_METHODS:
-    BASELINE_CONFIG_KEYS[_method].update({"teacher_decay", "consistency_weight"})
+    BASELINE_CONFIG_KEYS[_method].update({"teacher_decay", "consistency_weight", "reset_teacher_each_round"})
 for _method in _EXPERT_METHODS:
     BASELINE_CONFIG_KEYS[_method].add("consistency_weight")
 BASELINE_CONFIG_KEYS["fedprox"].add("proximal_mu")
@@ -67,6 +67,10 @@ def validate_baseline_config(config: Mapping[str, Any] | None = None) -> None:
             name = f"baselines.{method}.{key}"
             if key not in BASELINE_CONFIG_KEYS[method]:
                 raise ValueError(f"Unknown or inapplicable baseline option: {name}")
+            if key == "reset_teacher_each_round":
+                if not isinstance(value, bool):
+                    raise ValueError(f"{name} must be a boolean")
+                continue
             if key == "schedule":
                 if not isinstance(value, str) or value not in {"local_epochs", "round_stages"}:
                     raise ValueError(f"{name} must be local_epochs or round_stages")
@@ -479,7 +483,11 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
     head_only_epochs = overrides.get("head_only_epochs", 1)
     start, end = overrides.get("teacher_decay_start", .99), overrides.get("teacher_decay_end", .999)
     span = end - start if {"teacher_decay_start", "teacher_decay_end"} & overrides.keys() else .009
-    scheduled = fsslod_ema_decay(round_index, epoch_index) if config is None else start + span * (epochs * round_index + epoch_index) / max(1, rounds * epochs - 1)
+    schedule_rounds = (config or {}).get('experiment', {}).get('schedule_rounds', rounds)
+    if isinstance(schedule_rounds, bool) or not isinstance(schedule_rounds, int) or schedule_rounds < 1:
+        raise ValueError('experiment.schedule_rounds must be a positive integer')
+    scheduled = fsslod_ema_decay(round_index, epoch_index) if config is None else \
+        start + span * min(1., (epochs * round_index + epoch_index) / max(1, schedule_rounds * epochs - 1))
     policy = {
         "method": method, "round_index": round_index, "epoch_index": epoch_index,
         "pseudo_threshold": 0.95 if method == "proxyfl" else 0.75,
@@ -509,7 +517,7 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
         "use_state_matched_reuse": method in {"generic_hc", "tefed"},
         "is_new_detector_adaptation": True,
     }
-    policy.update({key: value if key in {"reference_weighting", "aggregation_mode", "head_only_epochs", "fedawa_steps", "schedule", "supervised_rounds", "backbone_only_until"} else float(value)
+    policy.update({key: value if key in {"reference_weighting", "aggregation_mode", "head_only_epochs", "fedawa_steps", "schedule", "supervised_rounds", "backbone_only_until", "reset_teacher_each_round"} else float(value)
                    for key, value in overrides.items() if key not in {"teacher_decay_start", "teacher_decay_end"}})
     if method == 'proxyfl':
         for key, value in {'proxy_weight': 1.0, 'proposal_floor': .05, 'server_steps': 10,
@@ -525,8 +533,28 @@ def policy_dict(method: str, round_index: int, epoch_index: int,
                       orthogonal_coefficient=policy['orthogonal_coefficient'] if stage == 'full' else 0.)
     if round_index < supervised_rounds:
         policy.update(use_unlabeled=False, consistency_weight=0.)
-    policy['alignment_weight'] = float((config or {}).get('loss', {}).get('rho', .1)) if experts else 0.
+    policy['alignment_weight'] = float((config or {}).get('loss', {}).get('rho', .1))
+    policy['alignment_scope'] = 'all' if experts else 'labeled'
     return policy
+
+
+def optimizer_learning_rate(config: Mapping[str, Any], round_index: int) -> float:
+    """Warm up and decay on a fixed horizon, then hold the final rate."""
+    if isinstance(round_index, bool) or not isinstance(round_index, int) or round_index < 0:
+        raise ValueError('round_index must be a nonnegative integer')
+    experiment, optimizer = config.get('experiment', {}), config.get('optimizer', {})
+    horizon = experiment.get('schedule_rounds', experiment.get('rounds', 30))
+    warmup = optimizer.get('warmup_rounds', 3)
+    if isinstance(horizon, bool) or not isinstance(horizon, int) or horizon < 1:
+        raise ValueError('experiment.schedule_rounds must be a positive integer')
+    if isinstance(warmup, bool) or not isinstance(warmup, int) or warmup < 0:
+        raise ValueError('optimizer.warmup_rounds must be a nonnegative integer')
+    initial = _nonnegative(optimizer.get('learning_rate', .01), 'optimizer.learning_rate')
+    final = _nonnegative(optimizer.get('final_learning_rate', .001), 'optimizer.final_learning_rate')
+    if round_index < warmup:
+        return initial * (round_index + 1) / warmup
+    progress = min(1., (round_index - warmup) / max(1, horizon - warmup - 1))
+    return final + (initial - final) * (1 + cos(pi * progress)) / 2
 
 
 def policy_schedule(method: str, config: Mapping[str, Any]) -> list[dict[str, Any]]:

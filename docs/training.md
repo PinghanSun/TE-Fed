@@ -70,7 +70,11 @@ The supplied 300-round configurations select `baselines.fedsto.schedule="round_s
 
 The separate local-epoch protocol uses `schedule="local_epochs"` and `head_only_epochs=1`, with no `backbone_only_until`. It freezes shared modules in the first local epoch and unfreezes them thereafter. Do not combine these two schedule types.
 
-Confidence self-training, Consistent-Teacher + FedAWA, FSSLOD and ProxyFL use `supervised_rounds=5` before unlabeled training in the supplied configurations. This labeled-only stage is separate from the optimizer's learning-rate warm-up. Conventional baselines do not receive TE-Fed's cross-modal alignment loss.
+Confidence self-training, Consistent-Teacher + FedAWA, FSSLOD and ProxyFL use `supervised_rounds=5` before unlabeled training in the supplied configurations. This labeled-only stage is separate from the optimizer's learning-rate warm-up. Consistent-Teacher + FedAWA and FSSLOD reset their EMA teachers from the broadcast detector each round, as does FedSTO.
+
+On Tomato, conventional baselines apply the configured cross-modal contrastive weight to labeled regions only. TE-Fed, Server-MoE and Generic HC use the contrastive term over their assembled training regions. RGB-only detector inputs disable this term. Sample-weighted aggregation uses unique labeled plus unlabeled training observation counts, including during labeled-only stages.
+
+`experiment.schedule_rounds=300` fixes the learning-rate and FSSLOD EMA schedules independently of the total run length. Increasing `experiment.rounds` to 500 or 1000 keeps the same first 300 rounds. Later rounds retain learning rate 0.001 and FSSLOD EMA decay 0.999. For a separate 30-round schedule, set `schedule_rounds=30` or omit it.
 
 ## Initialization and calibration
 

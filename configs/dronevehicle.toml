@@ -5,6 +5,7 @@ method = "tefed"
 # Five run IDs; pair methods using an explicit block manifest.
 seeds = [0, 1, 2, 3, 4]
 rounds = 300
+schedule_rounds = 300
 # Completed-round counts. For a separate long run: rounds=1000 and [300,500,1000].
 save_rounds = [300]
 local_epochs = 2
@@ -78,6 +79,7 @@ pseudo_threshold = 0.75
 proximal_mu = 0.01
 
 [baselines.consistent_teacher_fedawa]
+reset_teacher_each_round = true
 supervised_rounds = 5
 pseudo_threshold = 0.75
 teacher_decay = 0.999
@@ -97,6 +99,7 @@ backbone_only_until = 150
 orthogonal_coefficient = 0.05
 
 [baselines.fsslod]
+reset_teacher_each_round = true
 supervised_rounds = 5
 pseudo_threshold = 0.75
 teacher_decay_start = 0.99

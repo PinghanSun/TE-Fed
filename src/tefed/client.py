@@ -197,7 +197,8 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
         upload = {'client_id': client_id, 'delta': delta, 'bar_R': rbar, 'gain': gain}
         ledger.update(bar_R=rbar, validation_gain=gain)
     next_state = update_state(state, _state_statistics(unlabeled, assessed, calibration)) if unlabeled else deepcopy(state)
-    return {'after': after, 'delta': delta, 'upload': upload, 'sample_count': len(labeled), 'next_state': next_state,
+    training_ids = {record.id for split in ('labeled', 'unlabeled') for record in manifest.by_split(split, client_id)}
+    return {'after': after, 'delta': delta, 'upload': upload, 'sample_count': len(training_ids), 'next_state': next_state,
             'descriptors': descriptors, 'source_states': source_states, 'candidate_audit': candidate_audit,
             'selected_events': selected_events, 'ledger': ledger, 'persistent_state': next_persistent}
 

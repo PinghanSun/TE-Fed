@@ -37,7 +37,8 @@ class PrimaryScheduleTests(unittest.TestCase):
                 self.assertEqual(p['fedsto_stage'], stage)
                 self.assertEqual(p['use_unlabeled'], stage != 'supervised')
                 self.assertEqual(p['orthogonal_coefficient'], .05 if stage == 'full' else 0.)
-                self.assertEqual(p['alignment_weight'], 0.)
+                self.assertEqual(p['alignment_weight'], .1)
+                self.assertEqual(p['alignment_scope'], 'labeled')
 
     @unittest.skipUnless(torch is not None, 'Requires native training dependencies')
     def test_frozen_neck_and_head_keep_backbone_gradient_and_bn_state(self):

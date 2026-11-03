@@ -277,7 +277,7 @@ class NativeBaselineConfigurationTests(unittest.TestCase):
                 result = engine.run_experiment(config, output_dir=root / 'run')
             call = aggregate.call_args
             self.assertEqual(len(call.args), 1)
-            self.assertEqual(call.kwargs, {'sample_counts': [2, 1], 'temperature': .25, 'cap': .8})
+            self.assertEqual(call.kwargs, {'sample_counts': [3, 2], 'temperature': .25, 'cap': .8})
             saved = json.loads((root / 'run' / 'configuration.json').read_text())
             self.assertEqual(saved['resolved_baseline_policies'], policy_schedule(method, config))
             row = result['rounds'][0]

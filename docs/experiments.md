@@ -58,6 +58,7 @@ Set completed-round counts in the configuration:
 ```toml
 [experiment]
 rounds = 1000
+schedule_rounds = 300
 save_rounds = [300, 500, 1000]
 ```
 

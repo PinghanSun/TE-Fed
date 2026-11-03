@@ -5,7 +5,8 @@
 - Export float32 axial camera-Z in metres, with scene scale and a depth validity mask.
 - Share one-time rendered-depth conversion between verification and local training, followed by fixed Tomato millimetre-depth normalization.
 - Add FedSTO round stages to the 300-round configurations, including frozen neck/head BN statistics and final-stage neck/head regularization. Retain the separate local-epoch protocol.
-- Apply five-round supervised warm-up to the configured semi-supervised baselines, and keep TE-Fed alignment out of conventional baseline objectives.
+- Apply five-round supervised warm-up and round-reset teachers to the configured semi-supervised baselines. Conventional Tomato baselines use cross-modal contrast on labeled regions only.
+- Use unique labeled plus unlabeled observation counts for sample-weighted aggregation, and hold learning-rate and FSSLOD EMA schedules fixed after round 300 during continuation.
 - Summarize request-level P95 by scope and paired block, with nearest-rank quantiles, attempt/failure counts and sample SD.
 - Add regression tests for depth geometry, training-stage boundaries and timing summaries.
 
