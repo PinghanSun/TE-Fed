@@ -15,7 +15,9 @@ The supplied Tomato class map uses `['non-ripe', 'ripe']`. Class IDs must match 
 
 ## Tomato
 
-Pair RGB, depth and NIR by observation ID. RGB is uint8; depth contains finite nonnegative sensor values and uses `model.depth_scale`; NIR is uint8 or a floating-point `.npy` array in `[0,1]`. Prepare 16-bit NIR using the training normalization before loading it. The input example's colors and percentile limits are for display.
+Pair RGB, depth and NIR by observation ID. RGB is uint8. Under `DEPTH-MM-v1`, dataset depth is uint16 in millimetres, with zero marking invalid pixels. Loading preserves a validity mask and uses float32 values divided by the fixed `model.depth_scale=65535.0`, then clipped to `[0,1]`. Invalid pixels remain zero. NIR is uint8 or a floating-point `.npy` array in `[0,1]`. Prepare 16-bit NIR using the training normalization before loading it. The input example's colors and percentile limits are for display.
+
+Rendered depth is float32 axial camera-Z in metres. It is multiplied by `renderer.depth_unit_conversion=1000.0` once before the same network normalization. Keep it in floating point during conversion. The [rendering guide](rendering.md#depth-convention) defines scene scale and geometry.
 
 The manifest contains image paths, client IDs, explicit splits, class names, calibration IDs and evaluation-view IDs. See the [manifest fields](training.md#data-manifest) and [paired input example](../examples/tomato_trimodal/README.md).
 

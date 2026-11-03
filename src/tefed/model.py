@@ -97,6 +97,7 @@ class RoutedYOLO(nn.Module):
             base.load(YOLO(weights).model, verbose=False)
         self.fusion = InputFusion()
         self.trunk = nn.ModuleList(list(base.model)[:-1])
+        self.backbone_layers = len(base.yaml["backbone"])
         general = base.model[-1]
         self.feature_indices = tuple(general.f)
         # Read pyramid sizes without updating BN statistics.
@@ -350,7 +351,8 @@ def sample_tensor(sample, device='cpu', *, rgb_only=False):
                 scale = float(sample.get('depth_scale',1.0))
                 if not np.isfinite(scale) or scale <= 0:
                     raise ValueError('A fixed positive depth_scale is required')
-                value = np.clip(value/scale,0,1)
+                from .depth import normalize_depth
+                value, finite = normalize_depth(value, scale, sample.get('depth_validity'))
             else:
                 scale = 1.0 if np.issubdtype(np.asarray(sample[key]).dtype,np.floating) and np.nanmax(value,initial=0)<=1 else 255.0
                 value = np.clip(value/scale,0,1)

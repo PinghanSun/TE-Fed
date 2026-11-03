@@ -368,6 +368,7 @@ def load_sample(record: SampleRecord, *, size: int | tuple[int, int] = (640, 640
     targets = [{"box": b.tolist(), "class_id": a.class_id} for b, a in zip(mapped, labels)]
     return {"id": record.id, "client_id": record.client_id, "split": record.split,
             "rgb": rgb_array, **modalities, "targets": targets,
+            "depth_validity": modalities["depth"] > 0 if modalities["depth"] is not None else None,
             "meta": transform.as_dict(), "ignore_labels": record.split == "unlabeled"}
 
 
@@ -428,15 +429,22 @@ def apply_unseen(sample: Mapping[str, Any], *, identity: str | int,
             if any(key in values for key in (f"{name}_scale", f"{name}_brightness", f"{name}_noise_std")):
                 raise ValueError(f"Cannot perturb absent modality {name}")
             out[name] = None
+            if name == "depth":
+                out["depth_validity"] = None
             continue
         arr = np.asarray(arr, dtype=np.float32).copy()
-        valid = arr > 0 if name == "depth" else np.ones_like(arr, dtype=bool)
+        if name == "depth":
+            from .depth import clean_depth
+            arr, valid = clean_depth(arr, sample.get("depth_validity"))
+        else:
+            valid = np.ones_like(arr, dtype=bool)
         arr *= values.get("depth_scale" if name == "depth" else "nir_brightness", 1.0)
         if values.get(f"{name}_noise_std", 0):
             arr[valid] += rng.normal(0, values[f"{name}_noise_std"], size=int(valid.sum()))
         if name == "depth":
             arr[~valid] = 0
             out[name] = np.maximum(arr, 0).astype(np.float32)
+            out["depth_validity"] = valid & (out[name] > 0)
         else:
             out[name] = np.clip(arr, 0, 255).astype(np.uint8)
     height, width = out["rgb"].shape[:2]
@@ -444,8 +452,8 @@ def apply_unseen(sample: Mapping[str, Any], *, identity: str | int,
     dy = int(round(values.get("translate_y", 0.0) * height))
     flip = values.get("horizontal_flip", False)
     if flip or dx or dy:
-        for name in ("rgb", "depth", "nir"):
-            if out[name] is None:
+        for name in ("rgb", "depth", "nir", "depth_validity"):
+            if out.get(name) is None:
                 continue
             arr = out[name][:, ::-1].copy() if flip else out[name]
             shifted = np.full_like(arr, 114 if name == "rgb" else 0)

@@ -18,6 +18,10 @@ from bpy_extras.object_utils import world_to_camera_view
 from mathutils import Matrix, Vector
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tefed.depth import axial_depth_from_positions
+
+
 ATTRIBUTE_NAMES = ["size", "cls", "occ", "illum", "view", "geo", "ctx", "sens"]
 FRUIT_PATTERN = re.compile(r"^(project_asset_tomato_(red|green|yellow)_\d+_\d+_\d+)_")
 
@@ -117,6 +121,7 @@ def configure_passes(scene, out: Path, prefix: str):
     layer = scene.view_layers[0]
     layer.use_pass_z = True
     layer.use_pass_object_index = True
+    layer.use_pass_position = True
     if hasattr(scene, "compositing_node_group"):
         tree = bpy.data.node_groups.new("TEFedCompositor", "CompositorNodeTree")
         scene.compositing_node_group = tree
@@ -129,7 +134,7 @@ def configure_passes(scene, out: Path, prefix: str):
         composite = tree.nodes.new("CompositorNodeComposite")
     render = tree.nodes.new("CompositorNodeRLayers")
     tree.links.new(render.outputs["Image"], composite.inputs["Image"])
-    for socket_names, name in [(["Depth"], "depth"), (["Object Index", "IndexOB"], "instances")]:
+    for socket_names, name in [(["Depth"], "depth"), (["Position"], "position"), (["Object Index", "IndexOB"], "instances")]:
         node = tree.nodes.new("CompositorNodeOutputFile")
         if hasattr(node.format, "media_type"):
             node.format.media_type = "IMAGE"
@@ -140,7 +145,7 @@ def configure_passes(scene, out: Path, prefix: str):
         if hasattr(node, "file_output_items"):
             node.directory = str(out)
             node.file_name = f"{prefix}_{name}"
-            node.file_output_items.new("FLOAT", name)
+            node.file_output_items.new("VECTOR" if name == "position" else "FLOAT", name)
             node.file_output_items[0].save_as_render = False
             socket = node.inputs[name]
         else:
@@ -372,7 +377,11 @@ def main(request_path: Path, response_path: Path, *, group_adapter=None, perturb
     scene.render.filepath = str(raw_rgb)
     bpy.ops.render.render(write_still=True)
     rgb = read_image(raw_rgb)[:, :, :3]
-    depth = read_image(pass_file(out, "main", "depth"))[:, :, 0]
+    raw_range = read_image(pass_file(out, "main", "depth"))[:, :, 0]
+    positions = read_image(pass_file(out, "main", "position"))[:, :, :3]
+    meters_per_unit = float(request.get("scene_meters_per_unit", scene.unit_settings.scale_length))
+    depth, depth_validity = axial_depth_from_positions(positions, np.array(camera.matrix_world),
+        np.isfinite(raw_range) & (raw_range > 0) & (raw_range < 1e10), meters_per_unit=meters_per_unit)
     indices = np.rint(read_image(pass_file(out, "main", "instances"))[:, :, 0]).astype(np.int32)
     main_focus_mask = indices == focus["pass_index"]
     if main_focus_mask.sum() < 4:
@@ -409,6 +418,7 @@ def main(request_path: Path, response_path: Path, *, group_adapter=None, perturb
     depth = np.where(valid_depth, depth, 0).astype(np.float32)
     dropout = rng.random(depth.shape) < 0.45 * control_attrs[7]
     depth[dropout] = 0
+    depth_validity &= ~dropout
     rgb = np.clip(rgb + rng.normal(0, 0.025 * control_attrs[7], rgb.shape), 0, 1)
     rgb8 = np.rint(rgb * 255).astype(np.uint8)
     # NIR from registered luminance and noise.
@@ -417,6 +427,7 @@ def main(request_path: Path, response_path: Path, *, group_adapter=None, perturb
     write_png(out / "rgb.png", rgb8)
     write_png(out / "nir.png", np.rint(nir * 255))
     np.save(out / "depth.npy", depth, allow_pickle=False)
+    np.save(out / "depth_validity.npy", depth_validity, allow_pickle=False)
     np.save(out / "nir.npy", nir, allow_pickle=False)
     np.save(out / "instances.npy", indices, allow_pickle=False)
     np.save(out / "focal_visible_mask.npy", main_focus_mask, allow_pickle=False)
@@ -446,12 +457,13 @@ def main(request_path: Path, response_path: Path, *, group_adapter=None, perturb
         "status": "ok", "id": request["case_id"], "seed": request["seed"],
         "specialist_id": request.get("specialist_id"), "scene_path": request["scene_path"],
         "rgb": str(out / "rgb.png"), "depth": str(out / "depth.npy"), "nir": str(out / "nir.npy"),
+        "depth_validity": str(out / "depth_validity.npy"),
         "instance_mask": str(out / "instances.npy"), "labels": str(out / "labels.txt"),
         "targets": targets, "focal_target_index": focal_index, "target_box": target_box,
         "attrs_measured": measured, "measured_attributes": measured,
         "geometry": None,
         "measurements": {"attribute_names": ATTRIBUTE_NAMES, "types": measurement_types, "focal_visible_pixels": int(main_focus_mask.sum()), "focal_isolated_pixels": int(isolated_mask.sum()), "focal_visibility": visibility, "crop_luminance": luminance, "valid_depth_fraction": float((depth[ya:yb, xa:xb] > 0).mean()), "image_size": [width, height], "sensor": sensor_measurements, "viewpoint": viewpoint_measurements},
-        "metadata": {"implementation": "tefed", "blender_version": bpy.app.version_string, "renderer": "Cycles CPU", "rgb_depth_nir_registration": "same_camera_same_frame", "depth_units": "asset_scene_units_not_calibrated_metres", "nir_model": "rendered_rgb_luminance_plus_seeded_noise_no_spectral_materials", "occlusion_measurement": "one_minus_visible_to_isolated_silhouette_ratio", "annotation_type": "visible_instance_mask_bbox", "minimum_annotation_pixels": 4, "controls": controls, "unknown_attributes_are_missing": True},
+        "metadata": {"implementation": "tefed", "blender_version": bpy.app.version_string, "renderer": "Cycles CPU", "rgb_depth_nir_registration": "same_camera_same_frame", "depth_units": "metres", "depth_quantity": "axial_camera_z", "scene_meters_per_unit": meters_per_unit, "nir_model": "rendered_rgb_luminance_plus_seeded_noise_no_spectral_materials", "occlusion_measurement": "one_minus_visible_to_isolated_silhouette_ratio", "annotation_type": "visible_instance_mask_bbox", "minimum_annotation_pixels": 4, "controls": controls, "unknown_attributes_are_missing": True},
     }
     result["metadata"].update(renderer_adapter=adapter_name, scene_data_origin=str(scene.get("tefed_data_origin", "asset")))
     if group_adapter is None:

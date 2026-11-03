@@ -34,7 +34,7 @@ jobs:
       - run: uv sync --locked
       - run: uv run --locked python -m tefed --help
       - run: uv run --locked python -m tefed methods
-      - run: uv run --locked python -m unittest tests.test_trimodal_preview tests.test_packaging -v
+      - run: uv run --locked python -m unittest tests.test_trimodal_preview tests.test_packaging tests.test_depth_protocol tests.test_primary_schedule tests.test_request_measurement -v
       - run: uv run --locked python -m tefed preview --example examples/tomato_trimodal --output runs/tomato_preview
       - run: uv build --wheel --out-dir dist
       - run: uv run --locked python scripts/check_wheel.py --dist dist

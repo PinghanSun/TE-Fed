@@ -103,6 +103,10 @@ class BlenderRenderer:
             image_size = [image_size, image_size]
         if not isinstance(image_size, (list, tuple)) or len(image_size) != 2 or any(not isinstance(v, int) or isinstance(v, bool) or not 32 <= v <= 4096 for v in image_size):
             raise ValueError("image_size must be [width, height], both integers in [32, 4096]")
+        scene_scale = request.get("scene_meters_per_unit")
+        if scene_scale is not None and (isinstance(scene_scale, bool) or not isinstance(scene_scale, (int, float))
+                                        or not math.isfinite(scene_scale) or scene_scale <= 0):
+            raise ValueError("scene_meters_per_unit must be positive and finite")
         scene_value = request.get("scene_path") or self.scene_path
         if scene_value is None:
             raise ValueError("scene_path is required; local assets are not bundled")
@@ -141,6 +145,10 @@ class BlenderRenderer:
             path = Path(response[key]).resolve()
             if not path.is_relative_to(out) or not path.is_file():
                 raise RuntimeError(f"Invalid or missing renderer output {key}: {path}")
+        if response.get("depth_validity") is not None:
+            path = Path(response["depth_validity"]).resolve()
+            if not path.is_relative_to(out) or not path.is_file():
+                raise RuntimeError(f"Invalid or missing renderer depth_validity: {path}")
         if not response.get("targets") or response.get("focal_target_index") is None:
             raise RuntimeError("Renderer produced no visible source-class focal target")
         measured = response.get("attrs_measured")

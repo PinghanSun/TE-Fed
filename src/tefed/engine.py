@@ -93,6 +93,11 @@ def validate_run_config(config):
     depth_scale = float(model.get('depth_scale', 1.0))
     if not math.isfinite(depth_scale) or depth_scale <= 0:
         raise ValueError('model.depth_scale must be finite and positive')
+    for key in ('scene_meters_per_unit', 'depth_unit_conversion'):
+        value = config.get('renderer', {}).get(key)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value) or value <= 0):
+            raise ValueError(f'renderer.{key} must be finite and positive')
     cadence=config.get('evaluation',{}).get('monitor_every',0)
     if isinstance(cadence,bool) or not isinstance(cadence,int) or cadence<0:
         raise ValueError('evaluation.monitor_every must be a nonnegative integer')
@@ -183,10 +188,11 @@ def apply_input_policy(sample,config):
     model=config.get('model',{})
     sample['depth_scale']=float(model.get('depth_scale',1.0))
     if model.get('disable_auxiliary',False):
-        sample['depth']=None; sample['nir']=None; sample['ir']=None
+        sample['depth']=None; sample['depth_validity']=None; sample['nir']=None; sample['ir']=None
         sample['enabled_modalities']=['RGB']
     elif config.get('task')=='dronevehicle':
         sample['depth']=None
+        sample['depth_validity']=None
         sample['ir']=sample.get('nir')
         sample['enabled_modalities']=['RGB','IR']
     return sample
@@ -397,7 +403,7 @@ def _head_weights(item,head):
 
 
 def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,reference=None,proxy_prior=None):
-    from .baselines import policy_dict,update_ema_teacher,fedsto_set_trainable,proximal_penalty,elastic_penalty,orthogonality_penalty
+    from .baselines import policy_dict,update_ema_teacher,fedsto_set_trainable,fedsto_round_trainable,proximal_penalty,elastic_penalty,orthogonality_penalty
     policies=[policy_dict(method,round_id,epoch,config) for epoch in range(int(config['experiment'].get('local_epochs',2)))]
     device=next(model.parameters()).device
     optimcfg=config.get('optimizer',{})
@@ -438,7 +444,8 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
         ledger['baseline_policies'].append(deepcopy(policy))
         model.train()
         if method=='fedsto':
-            stage=fedsto_set_trainable(model,epoch,head_only_epochs=policy['head_only_epochs'])
+            stage=fedsto_round_trainable(model,policy['fedsto_stage']) if policy.get('fedsto_stage') else \
+                fedsto_set_trainable(model,epoch,head_only_epochs=policy['head_only_epochs'])
             ledger['stage_history'].append({'epoch_index':epoch,**stage})
         order=np.random.permutation(len(items))
         for start in range(0,len(order),batch_size):
@@ -449,7 +456,7 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
             batch_active=set()
             contrastive_inputs=[];contrastive_samples=[];consistency_sums=[];consistency_count=0
             consistency_coefficient=float(policy['consistency_weight'])
-            alignment_enabled=float(losses.get('rho',.1))>0 and not config['model'].get('detector_rgb_only',False) and not config['model'].get('disable_auxiliary',False)
+            alignment_enabled=float(policy['alignment_weight'])>0 and not config['model'].get('detector_rgb_only',False) and not config['model'].get('disable_auxiliary',False)
             for item in batch:
                 sample=item['sample']; targets=sample['targets']
                 if method == 'proxyfl' and item['kind'] == 'pseudo' and not targets:
@@ -506,7 +513,7 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
                     case_ids.add(case_id)
             auxiliary=[]
             with torch.amp.autocast('cuda',enabled=amp):
-                if method == 'proxyfl':
+                if method == 'proxyfl' and policy['use_unlabeled']:
                     from .proxyfl import proxy_objective
                     proxy_loss, proxy_stats = proxy_objective(model, batch, config, proxy_prior,
                         strong_view=_strong_view, round_id=round_id, epoch=epoch)
@@ -543,7 +550,8 @@ def train_local(model,items,config,*,round_id=0,method='tefed',teacher=None,refe
                 if policy.get('elastic_coefficient',0.)>0:
                     penalties.append(elastic_penalty(model,reference,policy['elastic_coefficient']))
                 if policy.get('orthogonal_coefficient',0.)>0:
-                    penalties.append(orthogonality_penalty(model,coefficient=policy['orthogonal_coefficient'],active_heads=sorted(batch_active)))
+                    penalties.append(orthogonality_penalty(model,coefficient=policy['orthogonal_coefficient'],active_heads=sorted(batch_active),
+                        include_neck=policy.get('fedsto_stage')=='full'))
                 if penalties:
                     penalty=sum(penalties)
                     if not torch.isfinite(penalty).item():
@@ -674,16 +682,8 @@ def _sample_case(case,config):
                         labels=tuple(parse_annotation(t) for t in case['targets']))
     sample=prepared_sample(record,config)
     conversion=case.get('depth_unit_conversion',case.get('depth_scale'))
-    if sample.get('depth') is not None:
-        if conversion is None:
-            sample['depth']=None
-            sample['rendered_depth_units_unresolved']=True
-        else:
-            conversion=float(conversion)
-            if not math.isfinite(conversion) or conversion<=0:
-                raise ValueError('Rendered depth unit conversion must be positive and finite')
-            sample['depth']=sample['depth']*conversion
-    return sample
+    from .depth import convert_rendered_depth
+    return convert_rendered_depth(sample,conversion)
 
 
 def _independent_selection(pool,round_index,count):
@@ -1208,7 +1208,7 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
             keep=batchnorm_state_keys(model) if method=='fedbn' else set()
             aggregate=sample_weighted_aggregate(trained_states,weights,previous=base,keep_predicate=lambda key:key in keep)
             model.import_state(aggregate)
-            if policy['aggregation'] == 'proxyfl':
+            if policy['aggregation'] == 'proxyfl' and policy['use_unlabeled']:
                 from .proxyfl import optimize_global_proxies
                 settings = cfg.get('baselines',{}).get('proxyfl',{})
                 tuning = optimize_global_proxies(model,trained_states,

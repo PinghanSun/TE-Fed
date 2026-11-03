@@ -48,12 +48,29 @@ Copy [Tomato](../configs/tomato.toml) or [DroneVehicle](../configs/dronevehicle.
 | `experiment.manifest`, `experiment.calibration` | Data manifest and calibration JSON |
 | `experiment.device` | CPU or CUDA device |
 | `model.initial_checkpoint` | Shared pretrained detector |
-| `model.depth_scale` | Dataset depth normalizer |
+| `model.depth_scale` | Fixed input divisor: `65535.0` for Tomato millimetre depth |
 | `renderer.blender`, `renderer.scene` | Blender executable and scene |
-| `renderer.depth_unit_conversion` | Scene-to-dataset depth conversion |
+| `renderer.scene_meters_per_unit` | Metres per scene coordinate unit: `1.0` for Tomato |
+| `renderer.depth_unit_conversion` | Exported metres to dataset millimetres: `1000.0` for Tomato |
 | `renderer.scene_class_map` | Scene roots mapped to class IDs |
 
-Correction methods use the rendering fields. Set depth conversion from the scene and dataset units, and map all five DroneVehicle classes. See the [rendering guide](rendering.md) for scene builders and the asset interface.
+Correction methods use the rendering fields. Map all five DroneVehicle classes. See the [rendering guide](rendering.md) for scene builders, axial-depth export and the asset interface.
+
+### Baseline stages
+
+The supplied 300-round configurations select `baselines.fedsto.schedule="round_stages"`:
+
+| Completed-round labels | Training |
+| --- | --- |
+| 1–50 | Labeled supervision, all detector modules trainable |
+| 51–150 | Labeled and pseudo supervision, backbone trainable, neck and heads frozen including BN statistics |
+| 151 onward | All detector modules trainable, neck/head orthogonality penalty enabled |
+
+`supervised_rounds=50` and `backbone_only_until=150` set the boundaries. The full stage continues for 500/1000-round runs. The resolved policy and trainable-stage flags are saved in each local training ledger.
+
+The separate local-epoch protocol uses `schedule="local_epochs"` and `head_only_epochs=1`, with no `backbone_only_until`. It freezes shared modules in the first local epoch and unfreezes them thereafter. Do not combine these two schedule types.
+
+Confidence self-training, Consistent-Teacher + FedAWA, FSSLOD and ProxyFL use `supervised_rounds=5` before unlabeled training in the supplied configurations. This labeled-only stage is separate from the optimizer's learning-rate warm-up. Conventional baselines do not receive TE-Fed's cross-modal alignment loss.
 
 ## Initialization and calibration
 

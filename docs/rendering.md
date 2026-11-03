@@ -102,7 +102,26 @@ freight_car = 4
 
 For Tomato, use `non_ripe=0` and `ripe=1`, or the IDs from the chosen class map. A mapped object root and its child meshes form one annotated instance. Roots must be disjoint, visible and uniquely named. `object:` and `collection:` prefixes are supported when names overlap.
 
-The example sets one scene unit to one metre, a 640×640 orthographic camera named `Camera`, a ground plane and an area light. `--resolution WIDTH HEIGHT` changes the saved size. Render requests can override image size. Set `renderer.depth_unit_conversion` from scene units to the dataset's depth units for training. The generated NIR/IR cue uses rendered luminance and noise, as in the renderer implementation.
+The example sets one scene unit to one metre, a 640×640 orthographic camera named `Camera`, a ground plane and an area light. `--resolution WIDTH HEIGHT` changes the saved size. Render requests can override image size. The generated NIR/IR cue uses rendered luminance and noise, as in the renderer implementation.
+
+## Depth convention
+
+The exporter projects the world-space Position pass onto the camera's forward axis to obtain axial camera-Z, for perspective and orthographic cameras. This avoids treating off-axis ray distance as Z. Scene coordinates are converted to metres using `renderer.scene_meters_per_unit`, when supplied, or the scene's unit scale otherwise. Depth metadata records the quantity, physical unit and scene scale.
+
+The Tomato configuration uses `DEPTH-MM-v1`:
+
+| Step | Setting |
+| --- | --- |
+| Scene coordinates | `renderer.scene_meters_per_unit=1.0` |
+| Export | `depth.npy`: float32 axial Z in metres |
+| Validity | `depth_validity.npy`: finite positive pixels, excluding background and dropout |
+| Loading rendered cases | Multiply by `renderer.depth_unit_conversion=1000.0` once, retaining float32 |
+| Dataset depth | Millimetres, with zero invalid |
+| Network input | Divide both sources by `model.depth_scale=65535.0`, clip to `[0,1]`, keep invalid pixels zero |
+
+Verification and local training use the same conversion helper. Already-converted in-memory samples are not multiplied again. No per-image depth range normalization is applied. DroneVehicle disables the depth channel. When adapting other scenes or datasets, set their scale and conversion explicitly.
+
+Blender's [render-pass documentation](https://docs.blender.org/manual/en/4.4/render/layers/passes.html) describes the Position and Z passes used by the exporter.
 
 ## Check a render
 

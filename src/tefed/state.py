@@ -1,4 +1,4 @@
-"""Maintain client state {q, p, h[5]} from TE-Fed Supplementary S7.
+"""Maintain client state {q, p, h[5]} from TE-Fed Supplementary S2.4.
 
 h orders illumination, occlusion, context, class boundary, and sensing.
 State stays frozen within a round and updates at the next boundary."""
