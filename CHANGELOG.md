@@ -1,6 +1,6 @@
 # Changes
 
-## Unreleased
+## Latest updates
 
 - Export float32 axial camera-Z in metres, with scene scale and a depth validity mask.
 - Share one-time rendered-depth conversion between verification and local training, followed by fixed Tomato millimetre-depth normalization.

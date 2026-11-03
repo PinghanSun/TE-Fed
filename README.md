@@ -36,7 +36,7 @@ Generate the [Tomato input preview](examples/tomato_trimodal/README.md):
 uv run --locked python -m tefed preview --example examples/tomato_trimodal --output runs/tomato_preview
 ```
 
-Full datasets and trained checkpoints are separate from this source release. Download the source archive, Python wheel and editable vehicle scene from [release 2.6.4](https://github.com/autumnyfot1898-bot/TE-Fed/releases/tag/v2.6.4). The [rendering guide](docs/rendering.md) covers procedural vehicle scenes; the [IR guide](docs/infrared.md) covers material-based NIR/LWIR rendering.
+Download the [current source archive](https://github.com/autumnyfot1898-bot/TE-Fed/archive/refs/heads/main.zip). The Python wheel and editable vehicle scene for version 2.6.4 are available from [its release page](https://github.com/autumnyfot1898-bot/TE-Fed/releases/tag/v2.6.4). Dataset sources and preparation are listed in the [data guide](docs/data.md). Training uses a local checkpoint prepared through the [training guide](docs/training.md). The [rendering guide](docs/rendering.md) covers procedural vehicle scenes; the [IR guide](docs/infrared.md) covers material-based NIR/LWIR rendering.
 
 ## Train and evaluate
 
