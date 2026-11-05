@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use TE-Fed, please cite this software."
 type: software
-title: "TE-Fed: From Rejected Predictions to Reusable Supervision with Source Evidence and State Matching for Federated Multimodal Object Detection"
+title: "TE-Fed"
 authors:
   - family-names: Sun
     given-names: Pinghan
@@ -14,4 +14,3 @@ keywords:
   - federated learning
   - semi-supervised object detection
   - multimodal object detection
-  - multisensor perception
