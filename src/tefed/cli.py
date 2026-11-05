@@ -202,11 +202,11 @@ def main(argv=None):
             executor=RemoteClientExecutor(config,manifest,identity)
             metrics,_=evaluate_remote_models(model,router,manifest,payload['states'],calibration,config,args.output,executor,
                 client_models=payload.get('client_models'),client_bn=payload.get('client_bn'),
-                local_new_client_id=payload.get('local_new_client_id'))
+                local_new_client_id=payload.get('local_new_client_id'),fedbn_prior=payload.get('fedbn_prior'))
         else:
             metrics=evaluate_model(model,router,manifest,payload['states'],calibration,config,Path(args.output)/'predictions',
                                    client_models=payload.get('client_models'),client_bn=payload.get('client_bn'),
-                                   local_new_client_id=payload.get('local_new_client_id'))
+                                   local_new_client_id=payload.get('local_new_client_id'),fedbn_prior=payload.get('fedbn_prior'))
         write_json(Path(args.output)/'metrics.json',metrics)
         print(json.dumps(metrics,indent=2))
         return 0

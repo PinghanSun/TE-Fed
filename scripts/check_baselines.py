@@ -276,7 +276,8 @@ def verify_run(result, method, requested_config, evidence, observed_calls):
     elif method == "fedbn":
         require(checkpoint.get("checkpoint_kind") == "fedbn_bundle", "Missing FedBN checkpoint bundle")
         require(set(checkpoint.get("client_bn", {})) == set(clients), "Missing client BN states")
-        kwargs = {"client_bn": checkpoint["client_bn"]}
+        require(checkpoint.get("fedbn_prior") is not None, "Missing fixed validation BN prior")
+        kwargs = {"client_bn": checkpoint["client_bn"], "fedbn_prior": checkpoint["fedbn_prior"]}
     reloaded = evaluate_model(model, router, manifest, checkpoint["states"], calibration,
                               checkpoint["config"], evidence / "reloaded_predictions", **kwargs)
     validate_metrics(reloaded)

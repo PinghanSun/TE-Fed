@@ -8,17 +8,17 @@ import json
 from pathlib import Path
 
 
-FACTORIAL_VERSION = 'tefed-factorial-v1'
+FACTORIAL_VERSION = 'tefed-factorial-v2'
 FACTORIAL_DEFINITIONS = {
     'A': {'on': 'State-dependent reliability qualification with the measured routed reliability weight.',
-          'off': 'Fixed posterior qualification at 0.75; keep validity checks, routed reliability weights and correction eligibility.'},
-    'B': {'on': 'TE-Fed source-evidence descriptors and stored-route verification.',
-          'off': 'Generic HC held-out coarse priors and current-route verification; no effect when C is off.'},
-    'C': {'on': 'Correction-capable training, rendering, verification, pool insertion and next-round selection.',
+          'off': 'Fixed posterior qualification at 0.75 with unit pseudo-target and background weights per active head; retain validity checks, routing, measured reliability and correction eligibility.'},
+    'B': {'on': 'Enable source-evidence correction only when C=1, with stored-route verification and state-matched reuse.',
+          'off': 'Effective correction E=B AND C is off; disable the entire correction path.'},
+    'C': {'on': 'Enable correction only when B=1; E=B AND C controls training, rendering, verification, pool insertion, descriptor/case probes and next-round selection.',
           'off': 'Server-MoE; disable the entire correction path, including descriptor collection.'},
 }
 
-CONDITION_VERSION = 'tefed-conditions-v1'
+CONDITION_VERSION = 'tefed-conditions-v2'
 CONDITION_DEFINITIONS = {
     'A': deepcopy(FACTORIAL_DEFINITIONS['A']),
     'E': {'on': 'Enable the complete source-evidence correction path (B=1 and C=1).',
@@ -50,7 +50,7 @@ def factorial_plans():
     jobs = []
     for a, b, c in product((0, 1), repeat=3):
         factors = {'A': a, 'B': b, 'C': c}
-        method = 'server_moe' if not c else 'tefed' if b else 'generic_hc'
+        method = 'tefed' if b and c else 'server_moe'
         patch = {'experiment': {'method': method},
                  'factorial': {'version': FACTORIAL_VERSION, 'definitions_sha256': definitions, 'factors': factors}}
         jobs.append((f'A{a}_B{b}_C{c}', patch))
@@ -76,14 +76,19 @@ def validate_factorial_config(config):
     factors = protocol.get('factors', {})
     if set(factors) != {'A', 'B', 'C'} or any(type(bit) is not int or bit not in (0, 1) for bit in factors.values()):
         raise ValueError('Factorial levels must be integer A/B/C bits')
-    expected = 'server_moe' if not factors['C'] else 'tefed' if factors['B'] else 'generic_hc'
+    effective_correction = bool(factors['B'] and factors['C'])
+    expected = 'tefed' if effective_correction else 'server_moe'
     if config['experiment'].get('method') != expected:
         raise ValueError('Factorial method does not implement the declared B/C operations')
-    if factors['C'] and not config['experiment'].get('test_mode', False):
+    if effective_correction:
+        decision = config.get('decision', {})
+        if decision.get('verification_route', 'stored') != 'stored' or decision.get('selection_mode', 'matched') != 'matched':
+            raise ValueError('E=1 requires stored-route verification and state-matched selection')
+    if effective_correction and not config['experiment'].get('test_mode', False):
         if not config.get('renderer', {}).get('enabled', True) or config.get('decision', {}).get('render_budget', 1152) <= 0:
-            raise ValueError('C=1 requires enabled rendering and a positive rendering budget')
+            raise ValueError('E=1 (B=C=1) requires enabled rendering and a positive rendering budget')
         if config.get('loss', {}).get('beta', .5) <= 0:
-            raise ValueError('C=1 requires positive correction supervision')
+            raise ValueError('E=1 (B=C=1) requires positive correction supervision')
     return factors
 
 
@@ -103,7 +108,8 @@ def apply_qualification_control(candidate, config):
         eligible = result['D_E'] >= decision.get('delta_d', .35) and cues['C'] >= decision.get('delta_c', .5) and cues['G'] >= decision.get('delta_g', .5)
         disposition = 'correction' if eligible else 'suppressed'
     result['disposition'] = disposition
-    result['qualification_control'] = {'mode': 'fixed_posterior', 'threshold': .75, 'original_disposition': original}
+    result['qualification_control'] = {'mode': 'fixed_posterior', 'threshold': .75,
+                                       'target_weight_policy': 'unit', 'original_disposition': original}
     return result
 
 
@@ -127,7 +133,7 @@ def factorial_manifest(config, seeds, output):
             'definitions_sha256': canonical_hash(FACTORIAL_DEFINITIONS), 'seed_ids': seeds,
             'bindings': bindings, 'scope': 'software_fixture' if config['experiment'].get('test_mode') else 'data_experiment',
             'configuration_sha256': canonical_hash(resolved),
-            'structural_null': 'B has no training effect when C=0; no separate B-to-router path is added.',
+            'structural_null': 'B0C0, B0C1 and B1C0 have no training effect relative to one another at fixed A: E=(B AND C)=0 disables the entire correction path.',
             'jobs': jobs}
     return {**body, 'protocol_sha256': canonical_hash(body)}
 

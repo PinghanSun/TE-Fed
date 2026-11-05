@@ -107,6 +107,12 @@ uv run --locked --extra cpu python -m tefed calibrate --config local.toml --chec
 
 Methods within a paired block share its partition, evaluation identities, initialization and calibration.
 
+### Fixed FedBN prior for New-client inference
+
+Before communication rounds, each client supplies only its validation inputs to the shared initial model in evaluation mode and collects per-layer activation moments. Labels are not used for this collection, and model parameters remain unchanged. The server pools the client moments to form one fixed BN prior for cold-start inference.
+
+The fixed prior is saved with evaluation checkpoints and `resume.pt` and is restored when training resumes. FedBN New-client inference reads that prior from the checkpoint. Keep the validation identities and shared initialization fixed within a paired block; evaluation inputs do not update the prior.
+
 ## Train, resume and evaluate
 
 ```bash

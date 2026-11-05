@@ -1,6 +1,6 @@
 # Experiments
 
-The main experiments used Tomato and DroneVehicle, with 300 rounds and five paired blocks per setting.
+The primary Tomato and DroneVehicle protocol uses 300 rounds and five paired blocks per setting. Each reported population and control requires its corresponding manifest and specific protocol configuration.
 
 ## Paired blocks
 
@@ -20,7 +20,7 @@ uv run --locked --extra cpu python scripts/run_suite.py --config local.toml --pl
 
 The comparison plan runs the 12 registered methods, including [ProxyFL](proxyfl.md). Omit `--execute` to validate and save the plan; use `--resume` to continue it. Other plans cover `mechanisms`, `budgets`, `components` and frozen-pool `replay`.
 
-Run the four effective conditions with:
+The default qualification/correction comparison uses four effective A/E conditions (`tefed-conditions-v2`, backed by `tefed-factorial-v2`):
 
 ```bash
 uv run --locked --extra cpu python scripts/run_suite.py --config local.toml --plan conditions --output runs/conditions --execute
@@ -28,12 +28,16 @@ uv run --locked --extra cpu python scripts/run_suite.py --config local.toml --pl
 
 | Condition | Qualification A | Correction E | Implementation bits |
 | --- | --- | --- | --- |
-| A0E0 | Fixed posterior threshold | Off | A=0, B=C=0 |
+| A0E0 | Fixed posterior threshold 0.75, unit weights | Off | A=0, B=C=0 |
 | A1E0 | Reliability qualification | Off | A=1, B=C=0 |
-| A0E1 | Fixed posterior threshold | On | A=0, B=C=1 |
+| A0E1 | Fixed posterior threshold 0.75, unit weights | On | A=0, B=C=1 |
 | A1E1 | Reliability qualification | On | A=1, B=C=1 |
 
-E switches B and C together. The eight-cell `factorial` plan provides the separate A/B/C analysis.
+Effective correction is `E=B AND C`. The four-condition plan sets `B=C=E`: E=1 enables the complete source-evidence rendering, stored-route verification, pool insertion, descriptor/case router probes and next-round state-matched reuse path; E=0 disables that path and uses Server-MoE.
+
+At A=0, validity checks, routing, measured reliability and correction eligibility remain active. Qualification uses posterior confidence at least 0.75. Every qualified pseudo-target has weight one in each head of the image's existing active-head union, and unmatched background has weight one. A=1 uses the state-dependent reliability gate and routed reliability weights.
+
+The eight-cell `factorial` plan retains the A/B/C encoding for protocol checks. At fixed A, B0C0, B0C1 and B1C0 all have E=0 and the same correction-disabled operations. They are structural duplicate controls. Generic HC is a separate registered method with its own coarse-prior correction procedure. Analyze the four A/E cells by default; retain the recorded version and operation-definition hashes when comparing runs.
 
 ```bash
 uv run --locked --extra cpu python scripts/analyze_runs.py conditions --records runs/conditions/conditions_hard_mAP50.jsonl --block-manifest blocks.json --blocks 0 1 2 3 4 --scale 100 --out runs/condition_effects.json
@@ -53,6 +57,8 @@ Method scores retain their input scale. Differences are reference minus comparat
 
 ## Checkpoints and plots
 
+The manuscript's primary AP uses fixed panels containing 512 annotated objects per dataset, block and evaluation view. Complete-test-pool AP evaluates the same checkpoint on a separate declared population. Supply the manifest and configuration for the intended population and retain its identity hashes. Historical NoCorrection controls also require their specific recorded configuration; the plan names alone do not recover those settings or the paper's scores.
+
 Set completed-round counts in the configuration:
 
 ```toml
@@ -65,6 +71,8 @@ save_rounds = [300, 500, 1000]
 The primary 300-round configuration uses `save_rounds=[300]`. Checkpoints are written after aggregation, router and client-state updates, before the round commit. Evaluation checkpoints retain the model, router and client state summaries, plus Local-only models or FedBN statistics when applicable. `resume.pt` also retains training and aggregation state. Record the training schedule with each checkpoint.
 
 `evaluation.monitor_every=1` saves per-round AP in `monitoring/round_*/metrics.json`. `report_runs.py plots` reads training loss from `rounds.jsonl` and final scores from `metrics.json`; it produces loss curves, metric comparisons and optional factorial-effect plots. Loss lines connect all recorded points, with sparse markers. `plot_values.csv` contains the plotted values. `report_runs.py qualitative` draws image-level detection comparisons.
+
+The manuscript's checkpoint-based Fig. 8 includes calculated intermediate values between saved evaluations. Reproducing that figure requires its saved checkpoint inputs and plotting protocol in addition to the run-output plotting command above.
 
 ## Additional settings
 

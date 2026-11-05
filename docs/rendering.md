@@ -2,7 +2,7 @@
 
 Blender scripts create editable scenes, input arrays and instance annotations.
 
-The [2.6.4 release](https://github.com/autumnyfot1898-bot/TE-Fed/releases/tag/v2.6.4) includes a ready-to-open vehicle and industrial-park scene with paired RGB/IR examples and run scripts.
+The historical [2.6.4 release](https://github.com/PinghanSun/TE-Fed/releases/tag/v2.6.4) includes a ready-to-open vehicle and industrial-park scene with paired RGB/IR examples and run scripts.
 
 ## Vehicle models and parking scene
 

@@ -277,6 +277,15 @@ def construct_cases(descriptors,model,router,source_states,participating_clients
         if calibration.get("luminance_median") is not None:
             request["descriptor"]={**rendering_d,"calibration":{"luminance_median":calibration["luminance_median"]}}
         response=renderer.render(request,folder)
+        # Algorithm 2 excludes zero fixed-mask mass before any expert response.
+        fixed_fidelity=core.fidelity_audit(rendering_d,response.get("attrs_measured"))
+        if fixed_fidelity["active_weight_mass"]<=0:
+            fixed_fidelity.update(valid=False,reason="empty_fidelity_mask",first_failed_gate="fidelity")
+            audit.append({**identity,"reason":"empty_fidelity_mask","first_failed_gate":"fidelity",
+                          "stage":"fidelity_precheck","verification_route":route_mode,
+                          "entered_verification":False,"retained":False,"fidelity":None,
+                          "fidelity_audit":fixed_fidelity})
+            continue
         depth_scale=config.get("renderer",{}).get("depth_unit_conversion",config.get("renderer",{}).get("depth_scale"))
         response={**response,"id":case_id,"depth_unit_conversion":depth_scale}
         sample=_load_case(response,config)

@@ -453,7 +453,7 @@ wheels = [
 
 [[package]]
 name = "te-fed-experiments"
-version = "2.6.4"
+version = "2.6.5.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },

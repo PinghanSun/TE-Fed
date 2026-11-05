@@ -1,6 +1,12 @@
 # Changes
 
-## Latest updates
+## Unreleased — 2.6.5.dev0
+
+- Align the displayed manuscript title and repository links with the current TE-Fed manuscript; retain v2.6.4 wheel/scene links as historical release assets.
+- Use v2 A/E controls with effective correction `E=B AND C`. At A=0, qualified pseudo-targets and background have unit weights per active head. The B0C0, B0C1 and B1C0 cells all disable correction; Generic HC remains a separate method.
+- Omit empty possible-class sets from ProxyFL ICPL anchors and negatives, and count omitted proposals separately.
+- Exclude rendered variants with zero fixed fidelity-mask weight before expert assessment, coverage and verification; keep these exclusions outside the verification denominator.
+- Form a fixed FedBN cold-start prior by pooling initial-model activation moments from client validation inputs; preserve it in checkpoints and resume state for New-client inference.
 
 - Export float32 axial camera-Z in metres, with scene scale and a depth validity mask.
 - Share one-time rendered-depth conversion between verification and local training, followed by fixed Tomato millimetre-depth normalization.

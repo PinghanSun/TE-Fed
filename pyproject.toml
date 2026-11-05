@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "te-fed-experiments"
-version = "2.6.4"
-description = "TE-Fed training and evaluation for federated semi-supervised multisensor detection"
+version = "2.6.5.dev0"
+description = "TE-Fed reference implementation for federated semi-supervised multimodal object detection"
 readme = "README.md"
 authors = [{name = "Pinghan Sun"}, {name = "Wenquan Jin"}]
 requires-python = ">=3.12,<3.13"
@@ -20,8 +20,8 @@ cpu = ["torch==2.5.1", "torchvision==0.20.1", "ultralytics==8.4.0", "scipy>=1.11
 tefed = "tefed.cli:main"
 
 [project.urls]
-Repository = "https://github.com/autumnyfot1898-bot/TE-Fed"
-Issues = "https://github.com/autumnyfot1898-bot/TE-Fed/issues"
+Repository = "https://github.com/PinghanSun/TE-Fed"
+Issues = "https://github.com/PinghanSun/TE-Fed/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

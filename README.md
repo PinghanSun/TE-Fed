@@ -1,19 +1,19 @@
 # TE-Fed
 
-[![Source checks](https://github.com/autumnyfot1898-bot/TE-Fed/actions/workflows/tests.yml/badge.svg)](https://github.com/autumnyfot1898-bot/TE-Fed/actions/workflows/tests.yml)
+[![Source checks](https://github.com/PinghanSun/TE-Fed/actions/workflows/tests.yml/badge.svg)](https://github.com/PinghanSun/TE-Fed/actions/workflows/tests.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
-**TE-Fed: Correction with Source Evidence and Reuse by State Matching for Federated Semi-Supervised Multisensor Object Detection.**
+**TE-Fed: From Rejected Predictions to Reusable Supervision with Source Evidence and State Matching for Federated Multimodal Object Detection.**
 
-TE-Fed verifies rendered correction cases against their recorded source expert routes and selects cases for each client's current state.
+TE-Fed renders correction cases from eligible rejected predictions. Verification recomputes expert responses with the recorded source expert identities and normalized route weights held fixed. Retained cases become available for state-matched reuse from the next round.
 
 <p align="center"><img src="assets/overview.png" width="100%" alt="TE-Fed overview"></p>
 
 ## Install
 
 ```bash
-git clone https://github.com/autumnyfot1898-bot/TE-Fed.git
+git clone https://github.com/PinghanSun/TE-Fed.git
 cd TE-Fed
 uv sync --locked --extra cpu
 uv run --locked --extra cpu python -m tefed methods
@@ -36,11 +36,11 @@ Generate the [Tomato input preview](examples/tomato_trimodal/README.md):
 uv run --locked python -m tefed preview --example examples/tomato_trimodal --output runs/tomato_preview
 ```
 
-Download the [current source archive](https://github.com/autumnyfot1898-bot/TE-Fed/archive/refs/heads/main.zip). The Python wheel and editable vehicle scene for version 2.6.4 are available from [its release page](https://github.com/autumnyfot1898-bot/TE-Fed/releases/tag/v2.6.4). Dataset sources and preparation are listed in the [data guide](docs/data.md). Training uses a local checkpoint prepared through the [training guide](docs/training.md). The [rendering guide](docs/rendering.md) covers procedural vehicle scenes; the [IR guide](docs/infrared.md) covers material-based NIR/LWIR rendering.
+Download the [current source archive](https://github.com/PinghanSun/TE-Fed/archive/refs/heads/main.zip). This source tree is version `2.6.5.dev0` (unreleased). The Python wheel and editable vehicle scene for version 2.6.4 remain available from [the historical release page](https://github.com/PinghanSun/TE-Fed/releases/tag/v2.6.4). The manuscript identifies its versioned reference as v2.6.3 and separately fixes additional interfaces by snapshot hashes; retain those identifiers when comparing artifacts. Dataset sources and preparation are listed in the [data guide](docs/data.md). Training uses a local checkpoint prepared through the [training guide](docs/training.md). The [rendering guide](docs/rendering.md) covers procedural vehicle scenes; the [IR guide](docs/infrared.md) covers material-based NIR/LWIR rendering.
 
 ## Train and evaluate
 
-The main experiments used 300 rounds, five run IDs, two local epochs and batch size four. Start with the [Tomato](configs/tomato.toml) or [DroneVehicle](configs/dronevehicle.toml) configuration.
+For the manuscript's primary protocol, use 300 communication rounds, five paired blocks, two local epochs per round and batch size four. Start with the [Tomato](configs/tomato.toml) or [DroneVehicle](configs/dronevehicle.toml) configuration. Use the corresponding manifests and specific protocol configurations for the primary AP panels, complete test pools and additional controls; see [experimental protocols](docs/experiments.md).
 
 Follow [data preparation](docs/data.md) and the [training guide](docs/training.md) to create the manifest, shared initialization and calibration, then run:
 

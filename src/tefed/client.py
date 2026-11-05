@@ -44,6 +44,33 @@ def restore_rng_state(state):
         torch.cuda.set_rng_state_all([torch.as_tensor(value.copy(), dtype=torch.uint8) for value in state['cuda']])
 
 
+def _bn_preprocessing_sha256(config):
+    from .evaluation_manifest import identity_sha256
+    keys = ['image_size', 'depth_scale', 'disable_auxiliary', 'detector_rgb_only']
+    return identity_sha256({'task': config.get('task'),
+                            'model': {key: config.get('model', {}).get(key) for key in keys}})
+
+
+def build_client_validation_bn_prior(model, manifest, config, *, client_id):
+    """Collect this client's validation BN moments without reading other splits."""
+    from .engine import prepared_sample
+    from .model import sample_tensor
+    from .evaluation_manifest import identity_sha256
+    from .fedbn import build_validation_bn_prior, bn_prior_to_arrays
+    records = sorted(manifest.by_split('validation', str(client_id)), key=lambda record: record.id)
+    if not records:
+        raise ValueError(f'Client {client_id} has no validation pool for its FedBN prior')
+    device = next(model.parameters()).device
+    binding = {'initial_model_sha256': identity_sha256(model.state_dict()),
+               'preprocessing_sha256': _bn_preprocessing_sha256(config)}
+    batches = (sample_tensor(prepared_sample(record, config), device,
+                             rgb_only=config.get('model', {}).get('detector_rgb_only', False))
+               for record in records)
+    artifact = build_validation_bn_prior(model, batches, validation_ids=[record.id for record in records],
+        binding=binding, forward=lambda current, batch: current(batch, active_heads=range(len(current.heads))))
+    return {'fedbn_prior': bn_prior_to_arrays(artifact)}
+
+
 def initialize_client_state(model, router, manifest, calibration, config, *, client_id, prior=None):
     from .engine import prepared_sample, assess_frame, _state_statistics
     from .baselines import policy_dict
@@ -75,6 +102,8 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
     allowed = {'local_model', 'teacher', 'bn', 'new_client_model'}
     if method == 'proxyfl':
         allowed.add('proxy_prior')
+    if method == 'fedbn':
+        allowed.add('fedbn_prior')
     if set(persistent) - allowed:
         raise ValueError('Unknown persistent client state')
     base = model.export_state()
@@ -179,6 +208,8 @@ def execute_client_round(model, router, manifest, state, calibration, config, *,
     if method == 'fedbn':
         keys = batchnorm_state_keys(student)
         next_persistent['bn'] = {key: value for key, value in module_state(student).items() if key in keys}
+        if persistent.get('fedbn_prior') is not None:
+            next_persistent['fedbn_prior'] = deepcopy(persistent['fedbn_prior'])
     after = student.export_state()
     delta = tree_delta(after, base)
     upload = None
@@ -229,12 +260,23 @@ def evaluate_client(model, router, manifest, state, calibration, config, *, clie
                 if persistent.get(key) is None:
                     raise ValueError(f'Local-only evaluation requires {key}')
                 load_module_state(model, persistent[key])
-            elif method == 'fedbn' and view != 'new-client':
-                if persistent.get('bn') is None:
-                    raise ValueError('FedBN evaluation requires the client BN state')
-                values = dict(before)
-                values.update(persistent['bn'])
-                load_module_state(model, values)
+            elif method == 'fedbn':
+                if view == 'new-client':
+                    from .fedbn import prior_from_arrays, apply_bn_prior
+                    if persistent.get('fedbn_prior') is None:
+                        raise ValueError('FedBN New-client evaluation requires a validation-pooled BN prior')
+                    artifact = prior_from_arrays(persistent['fedbn_prior'])
+                    binding = artifact['protocol'].get('binding', {})
+                    if binding.get('preprocessing_sha256') != _bn_preprocessing_sha256(config) or \
+                       'initial_model_sha256' not in binding:
+                        raise ValueError('FedBN validation prior preprocessing/initial-model binding differs')
+                    apply_bn_prior(model, artifact)
+                else:
+                    if persistent.get('bn') is None:
+                        raise ValueError('FedBN evaluation requires the client BN state')
+                    values = dict(before)
+                    values.update(persistent['bn'])
+                    load_module_state(model, values)
             targets, predictions, audit_records = {}, {}, []
             for record in records:
                 sample = prepared_sample(record, config)
@@ -258,6 +300,8 @@ def evaluate_client(model, router, manifest, state, calibration, config, *, clie
 
 def execute_client_task(config, manifest, model, router, calibration, *, action, client_id,
                         round_index=0, state=None, selected_cases=(), persistent_state=None, run_secret=None, replay_control=None):
+    if action == 'fedbn_prior':
+        return build_client_validation_bn_prior(model, manifest, config, client_id=client_id)
     if action == 'initialize':
         return {'state': initialize_client_state(model, router, manifest, calibration, config, client_id=client_id, prior=state)}
     if action == 'client_round':

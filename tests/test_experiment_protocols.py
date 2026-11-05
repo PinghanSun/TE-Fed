@@ -167,15 +167,16 @@ class FactorialProtocolTests(unittest.TestCase):
             config = merge({'experiment': {'test_mode': True}}, patch)
             levels = validate_factorial_config(config)
             method = config['experiment']['method']
-            self.assertEqual(method, 'server_moe' if not levels['C'] else 'tefed' if levels['B'] else 'generic_hc')
+            self.assertEqual(method, 'tefed' if levels['B'] and levels['C'] else 'server_moe')
 
-    def test_A_off_only_changes_qualification_and_keeps_validity_and_weights(self):
+    def test_A_off_keeps_route_reliability_but_marks_unit_pseudo_weights(self):
         off = next(patch for _, patch in factorial_plans() if patch['factorial']['factors']=={'A':0,'B':1,'C':1})
         config = merge({'experiment': {'test_mode': True}}, off)
         candidate = {'valid': True, 'R': .61, 'D_E': .5, 'posterior': [.8, .2],
                      'cues': {'C':.7,'G':.8}, 'disposition':'correction', 'route':[0,1,2], 'weights':[.5,.3,.2]}
         result = apply_qualification_control(candidate, config)
         self.assertEqual(result['disposition'], 'qualified')
+        self.assertEqual(result['qualification_control']['target_weight_policy'], 'unit')
         for key in ('R','route','weights'):
             self.assertEqual(result[key], candidate[key])
         self.assertEqual(candidate['disposition'], 'correction')
@@ -239,6 +240,16 @@ class FactorialProtocolTests(unittest.TestCase):
             self.assertEqual(results['A1_B1_C1']['metrics'], regular['metrics'])
             for name in full['model']:
                 self.assertTrue(torch.equal(full['model'][name], baseline['model'][name]), name)
+            for a in (0, 1):
+                reference = results[f'A{a}_B0_C0']
+                expected = torch.load(reference['checkpoint'], map_location='cpu', weights_only=True)
+                for b, c in ((0, 1), (1, 0)):
+                    equivalent = results[f'A{a}_B{b}_C{c}']
+                    self.assertEqual(equivalent['metrics'], reference['metrics'])
+                    actual = torch.load(equivalent['checkpoint'], map_location='cpu', weights_only=True)
+                    for name in expected['model']:
+                        self.assertTrue(torch.equal(actual['model'][name], expected['model'][name]),
+                                        (a, b, c, name))
 
 
 if __name__=='__main__':

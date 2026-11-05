@@ -89,7 +89,7 @@ class WorkerTaskCache:
         return index
 
     def execute(self, run_id, task_id, digest, action, index, compute):
-        if action not in {'initialize', 'client_round', 'evaluate'}:
+        if action not in {'initialize', 'client_round', 'evaluate', 'fedbn_prior'}:
             raise ValueError('Unknown worker action')
         try:
             with self._transaction() as connection:

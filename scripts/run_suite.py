@@ -71,8 +71,9 @@ def _timestamp():
 
 def _job_config(config, manifest, job):
     from tefed.baselines import policy_dict
+    from tefed.experiments import FACTORIAL_VERSION, CONDITION_VERSION
     resolved = merge(config, job['patch'])
-    if manifest.get('version') in {'tefed-factorial-v1', 'tefed-conditions-v1'}:
+    if manifest.get('version') in {FACTORIAL_VERSION, CONDITION_VERSION}:
         resolved['factorial']['plan_sha256'] = manifest['protocol_sha256']
     resolved['experiment']['seed'] = job['seed']
     method = resolved['experiment'].get('method', 'tefed')

@@ -146,7 +146,8 @@ class NativeSavedCheckpointTests(unittest.TestCase):
                     else:
                         self.assertEqual(payload['checkpoint_kind'], 'fedbn_bundle')
                         self.assertEqual(len(payload['client_bn']), 2)
-                        extra={'client_bn':payload['client_bn']}
+                        self.assertIn('fedbn_prior',payload)
+                        extra={'client_bn':payload['client_bn'], 'fedbn_prior':payload['fedbn_prior']}
                     metrics=engine.evaluate_model(model, router, manifest, payload['states'], calibration,
                                                   payload['config'], root/method/'recheck', **extra)
                     self.assertEqual(metrics, result['metrics'])

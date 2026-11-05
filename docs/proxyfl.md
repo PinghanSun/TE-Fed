@@ -26,9 +26,9 @@ Proxies are the class-convolution weights. ICPL uses matching one-to-many input 
 
 The frozen round-start detector supplies class distribution `q` using calibration temperature `T_C`; current local probabilities use ordinary softmax. The native detector score controls `proposal_floor`. For ICPL, local or global class confidence reaching the threshold gives a global top-1 singleton. Otherwise, the possible-class set is `S={c:q[c]>prior[c]}`. Pseudo box supervision uses high-confidence global proposals passing the foreground floor.
 
-With normalized feature `z` and normalized class row `p`, the positive logit is `z·p[argmax(q)]` for high confidence and `z·sum(q[c]p[c],c in S)` for low confidence. The low-confidence weighted sum is unnormalized; an empty set gives a zero positive vector.
+With normalized feature `z` and normalized class row `p`, the positive logit is `z·p[argmax(q)]` for high confidence and `z·sum(q[c]p[c],c in S)` for low confidence. The low-confidence weighted sum is unnormalized. If `S` is empty, omit both weak and strong features from ICPL anchors and negatives. `omitted_empty_count` counts these proposals once, while `low_count` counts the retained nonempty low-confidence proposals. High-confidence singletons and labeled negatives retain their existing roles.
 
-Negatives have disjoint class sets and feature cosine at least `1e-6`; self-pairs are excluded. ICPL averages `log(exp(positive)+sum(exp(negative)))-positive` over all weak/strong unlabeled anchors across scales. Global probabilities and the prior are detached; student features and proxy weights receive gradients.
+Negatives have nonempty disjoint class sets and feature cosine at least `1e-6`; self-pairs are excluded. ICPL averages `log(exp(positive)+sum(exp(negative)))-positive` over the retained weak/strong unlabeled anchors across scales. Global probabilities and the prior are detached; student features and proxy weights receive gradients.
 
 ## Global update
 

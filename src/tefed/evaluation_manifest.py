@@ -102,7 +102,7 @@ def validate_records(records,manifest,config,view,expected_ids):
 
 
 def build_evaluation_manifest(model,router,manifest,states,calibration,config,records_by_view,*,
-                              client_models=None,client_bn=None,local_new_client_id=None,prediction_dir=None):
+                              client_models=None,client_bn=None,local_new_client_id=None,prediction_dir=None,fedbn_prior=None):
     method=config.get('experiment',{}).get('method','tefed')
     prior=calibration.get('state_prior',{'q':.5,'p':.5,'h':[.2]*5})
     views={}
@@ -123,6 +123,17 @@ def build_evaluation_manifest(model,router,manifest,states,calibration,config,re
                 selected=selected if selected in client_models else local_new_client_id
                 row['model_selector']={'kind':'client_model','client_id':selected,
                                        'sha256':model_digests[selected]}
+            elif method=='fedbn' and view=='new-client':
+                if fedbn_prior is None:
+                    raise ValueError('FedBN New-client evaluation requires the fixed validation BN prior')
+                row['model_selector']={'kind':'global_with_validation_bn',
+                                       'bn_sha256':identity_sha256(fedbn_prior['state'])}
+            elif method=='fedbn':
+                from .baselines import batchnorm_state_keys
+                values=(client_bn or {}).get(client)
+                if values is None or set(values)!=batchnorm_state_keys(model):
+                    raise ValueError('FedBN evaluation requires the complete client BN state')
+                row['model_selector']={'kind':'global_with_client_bn','bn_sha256':bn_digests[client]}
             elif client_bn:
                 row['model_selector']={'kind':'global_with_client_bn' if view!='new-client' and client in client_bn else 'global',
                     'bn_sha256':bn_digests[client] if view!='new-client' and client in client_bn else None}
@@ -161,4 +172,5 @@ def build_evaluation_manifest(model,router,manifest,states,calibration,config,re
                 'router_sha256':identity_sha256(router.state_dict()),
                 'client_models_sha256':identity_sha256(client_models) if client_models else None,
                 'client_bn_sha256':identity_sha256(client_bn) if client_bn else None,
+                'validation_bn_prior_sha256':identity_sha256(fedbn_prior) if fedbn_prior is not None else None,
                 'local_new_client_id':local_new_client_id},'views':views}

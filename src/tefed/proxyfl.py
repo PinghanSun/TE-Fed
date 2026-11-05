@@ -162,7 +162,8 @@ def pool_contrastive_loss(features, positive_targets, possible_classes, anchor_m
 
     Targets use normalized class rows; low-confidence weighted targets are
     not renormalized. Negatives require disjoint class sets and cosine >= 1e-6.
-    Exclude self-pairs, including empty class sets.
+    Empty possible-class sets participate as neither anchors nor negatives.
+    Exclude self-pairs for all remaining sets.
     """
     if features.ndim != 2 or positive_targets.shape != features.shape:
         raise ValueError('Pool features and positive targets must share an N-by-D shape')
@@ -174,14 +175,16 @@ def pool_contrastive_loss(features, positive_targets, possible_classes, anchor_m
         raise ValueError('Pool features and positive targets must be finite')
     z = F.normalize(features.float(), dim=1, eps=1e-8)
     pools = possible_classes.to(device=z.device, dtype=torch.bool)
-    anchors = anchor_mask.to(device=z.device, dtype=torch.bool)
+    nonempty = pools.any(dim=1)
+    anchors = anchor_mask.to(device=z.device, dtype=torch.bool) & nonempty
     count = int(anchors.sum().item())
     if not count:
         loss = features.sum() * 0 + positive_targets.sum() * 0
         details = {'anchor_count': 0, 'negative_pair_count': 0}
         return (loss, details) if return_details else loss
     similarities = z @ z.T
-    negatives = (pools.float() @ pools.float().T == 0) & (similarities.detach() >= 1e-6)
+    negatives = ((pools.float() @ pools.float().T == 0)
+                 & (similarities.detach() >= 1e-6) & nonempty[None, :])
     negatives.fill_diagonal_(False)
     positive = (z * positive_targets.float()).sum(1)
     logits = torch.cat([positive[anchors, None], similarities[anchors].masked_fill(~negatives[anchors], -torch.inf)], dim=1)
@@ -216,7 +219,7 @@ def proxy_objective(model, batch, config, prior, *, strong_view, round_id, epoch
         raise ValueError('ProxyFL probability thresholds must lie in [0, 1]')
     class_prior = _probabilities([1 / classes] * classes if prior is None else prior, classes, device, 'Class prior')
     counts = [0] * classes
-    stats = {'labeled_count': 0, 'high_count': 0, 'low_count': 0, 'anchor_count': 0,
+    stats = {'labeled_count': 0, 'high_count': 0, 'low_count': 0, 'omitted_empty_count': 0, 'anchor_count': 0,
              'proposal_count': 0, 'negative_pair_count': 0, 'class_counts': counts, 'loss': 0.}
     items = []
     for item in batch:
@@ -294,6 +297,10 @@ def proxy_objective(model, batch, config, prior, *, strong_view, round_id, epoch
                     counts[label] += 1
                 else:
                     pool = q > class_prior
+                    if not bool(pool.any()):
+                        # Count the proposal once; omit both views from ICPL.
+                        stats['omitted_empty_count'] += 1
+                        continue
                     positive = ((q * pool).unsqueeze(1) * proxies).sum(0)
                     stats['low_count'] += 1
                 for view in (weak, strong):

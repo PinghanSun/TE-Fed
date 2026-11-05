@@ -12,7 +12,7 @@ import numpy as np
 
 from scripts import analyze_runs, run_suite
 from tefed.analysis import condition_contrasts, paired_method_summary
-from tefed.experiments import (condition_manifest, condition_plans,
+from tefed.experiments import (CONDITION_VERSION, condition_manifest, condition_plans,
                                factorial_plans, validate_factorial_config)
 from tefed.software_fixture import create_fixture
 
@@ -75,7 +75,7 @@ class ConditionProtocolTests(unittest.TestCase):
             manifest = run_suite.make_manifest(config, 'conditions', root / 'suite')
             self.assertEqual(manifest['seed_ids'], list(range(5)))
             self.assertEqual(len(manifest['jobs']), 20)
-            self.assertEqual(manifest['version'], 'tefed-conditions-v1')
+            self.assertEqual(manifest['version'], CONDITION_VERSION)
             self.assertIn('separate block manifest', manifest['repetition_unit'])
             for job in manifest['jobs']:
                 resolved = run_suite._job_config(config, manifest, job)

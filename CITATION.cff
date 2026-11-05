@@ -1,16 +1,17 @@
 cff-version: 1.2.0
 message: "If you use TE-Fed, please cite this software."
 type: software
-title: "TE-Fed: Correction with Source Evidence and Reuse by State Matching for Federated Semi-Supervised Multisensor Object Detection"
+title: "TE-Fed: From Rejected Predictions to Reusable Supervision with Source Evidence and State Matching for Federated Multimodal Object Detection"
 authors:
   - family-names: Sun
     given-names: Pinghan
   - family-names: Jin
     given-names: Wenquan
-version: 2.6.4
-date-released: 2026-11-02
+version: 2.6.5.dev0
+repository-code: "https://github.com/PinghanSun/TE-Fed"
 license: AGPL-3.0-only
 keywords:
   - federated learning
   - semi-supervised object detection
+  - multimodal object detection
   - multisensor perception

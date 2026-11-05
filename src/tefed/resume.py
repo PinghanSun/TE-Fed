@@ -119,7 +119,10 @@ def run_binding(config,manifest,*,labels_only,secret,workers=None):
             paths.update(str(Path(path).resolve()) for path in (record.rgb,record.depth,record.nir) if path is not None)
     else:
         for record in manifest.records:
-            if str(record.client_id)=='server' and record.id in manifest.calibration_ids:
+            server_calibration = str(record.client_id)=='server' and record.id in manifest.calibration_ids
+            coordinator_bn_validation = (config.get('experiment',{}).get('method')=='fedbn'
+                and record.split=='validation' and str(record.client_id) not in workers)
+            if server_calibration or coordinator_bn_validation:
                 paths.update(str(Path(path).resolve()) for path in (record.rgb,record.depth,record.nir) if path is not None)
     if not labels_only:
         paths.add(str(Path(config['experiment']['calibration']).resolve()))

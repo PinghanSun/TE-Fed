@@ -402,6 +402,14 @@ def _head_weights(item,head):
         d=item['case']['d']
         weights=dict(zip(d['route'],d['weights']))
         return [weights.get(head,0)]*len(item['sample']['targets'])
+    unit_policy=[c.get('qualification_control',{}).get('target_weight_policy')=='unit' for c in item['candidates']]
+    if any(unit_policy):
+        if not all(unit_policy):
+            raise ValueError('An image cannot mix pseudo-target weight policies')
+        # Keep the routed head union; each active A=0 head trains on every
+        # qualified target with weight one, so its background mean is also one.
+        active=any(head in c['route'] for c in item['candidates'])
+        return [float(active)]*len(item['candidates'])
     return [float(c['R'])*dict(zip(c['route'],c['weights'])).get(head,0.) for c in item['candidates']]
 
 
@@ -595,11 +603,13 @@ def save_checkpoint(path,model,router,config,states,pool,round_index):
     write_json(path.with_suffix('.pool.json'),pool)
 
 
-def _saved_checkpoint_bundle(model,manifest,config,local_models,bn_cache,*,remote=False):
+def _saved_checkpoint_bundle(model,manifest,config,local_models,bn_cache,*,remote=False,fedbn_prior=None):
     """Include the client model or BN state needed for frozen checkpoint evaluation."""
     method=config['experiment'].get('method','tefed')
     if method=='fedbn':
-        return {'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache}
+        from .fedbn import validate_bn_prior
+        validate_bn_prior(model,fedbn_prior)
+        return {'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache,'fedbn_prior':fedbn_prior}
     if method!='local':
         return {}
     records=[manifest.by_id[uid] for uid in manifest.calibration_ids]
@@ -622,7 +632,7 @@ def _saved_checkpoint_bundle(model,manifest,config,local_models,bn_cache,*,remot
 
 
 def load_checkpoint(path,config=None,device='cpu'):
-    checkpoint=torch.load(path,map_location=device,weights_only=True)
+    checkpoint=torch.load(path,map_location='cpu',weights_only=True)
     if checkpoint.get('model_schema_version')!=RoutedYOLO.schema_version:
         raise ValueError('Checkpoint model schema is incompatible; regenerate it with the current pretrain command')
     cfg=deepcopy(checkpoint['config'] if config is None else config)
@@ -697,7 +707,7 @@ def _independent_selection(pool,round_index,count):
 
 
 @torch.no_grad()
-def evaluate_model(model,router,manifest,states,calibration,config,output_dir,*,client_models=None,client_bn=None,local_new_client_id=None):
+def evaluate_model(model,router,manifest,states,calibration,config,output_dir,*,client_models=None,client_bn=None,local_new_client_id=None,fedbn_prior=None):
     _check_evaluation_classes(model,manifest,config)
     from .metrics import evaluate_detection
     from .evaluation_manifest import evaluation_record,build_evaluation_manifest
@@ -705,70 +715,91 @@ def evaluate_model(model,router,manifest,states,calibration,config,output_dir,*,
     views=config.get('evaluation',{}).get('views',['participating','unseen','new-client','hard'])
     method=config['experiment'].get('method','tefed')
     experts=method in {'server_moe','generic_hc','tefed'}
+    if method=='fedbn' and ('new-client' in views or fedbn_prior is not None):
+        from .fedbn import validate_bn_prior
+        from .client import _bn_preprocessing_sha256
+        validate_bn_prior(model,fedbn_prior)
+        if fedbn_prior['protocol']['binding'].get('preprocessing_sha256')!=_bn_preprocessing_sha256(config):
+            raise ValueError('FedBN validation BN prior preprocessing binding differs')
     prior=calibration.get('state_prior',{'q':.5,'p':.5,'h':[.2]*5})
     results={};audit_views={}
     before={k:v.detach().clone() for k,v in model.state_dict().items()}
     router_before={k:v.detach().clone() for k,v in router.state_dict().items()}
-    for view in views:
-        if view not in {'participating','unseen','new-client','hard'}:
-            raise ValueError(f'Unknown evaluation view: {view}')
-        records=manifest.by_split('hard' if view=='hard' else 'test')
-        specified=manifest.metadata.get('views',{})
-        normalized={str(k).lower().replace('_','-'):v for k,v in specified.items()}
-        if view in normalized:
-            allowed=set(map(str,normalized[view]))
-            records=tuple(r for r in manifest.records if r.id in allowed)
-            if len(records)!=len(allowed):
-                raise ValueError(f'Evaluation view {view} contains unresolved identities')
-        targets={}; predictions={};audit_views[view]=[]
-        path=output_dir/f'{view}.jsonl'
-        if path.exists():
-            raise FileExistsError(path)
-        for record in records:
-            if client_models:
-                client_key=local_new_client_id if view=='new-client' else str(record.client_id)
-                client_key=client_key if client_key in client_models else local_new_client_id
-                if client_key not in client_models:
-                    raise ValueError('Local-only evaluation needs a fixed model for the cold-start view')
-                model.load_state_dict(client_models[client_key],strict=True)
-            elif client_bn:
-                # Restore frozen global BN, then apply the client's trained BN state.
-                sd=model.state_dict()
-                all_bn={key for values in client_bn.values() for key in values}
-                for key in all_bn:
-                    sd[key]=before[key]
-                if view!='new-client' and str(record.client_id) in client_bn:
-                    sd.update(client_bn[str(record.client_id)])
-                model.load_state_dict(sd,strict=True)
-            sample=prepared_sample(record,config)
-            if view=='unseen':
-                sample=apply_unseen(sample,identity=record.id,
-                                    perturbation=config.get('evaluation',{}).get('unseen',{'rgb_brightness':config.get('evaluation',{}).get('unseen_brightness',.65)}),
-                                    seed=int(config['experiment'].get('seed',0)))
-            state=prior if view=='new-client' else states.get(str(record.client_id),prior)
-            assessed=assess_frame(model,router,sample,state,calibration,config,experts=experts)
-            detections=[{'box':c['box'],'class_id':c['class_id'],'score':float(c['score'])} for c in assessed['candidates']]
-            targets[record.id]=sample['targets']; predictions[record.id]=detections
-            audit_views[view].append(evaluation_record(record,sample,config,view,
-                state_source='calibration_prior' if view=='new-client' else
-                    ('frozen_client_state' if str(record.client_id) in states else 'calibration_prior_fallback')))
-            append_jsonl(path,{'id':record.id,'predictions':detections,'coordinate_system':'letterbox-normalized-xyxy',
-                              'view':view,'state_frozen':True})
-        results[view]=evaluate_detection(targets,predictions,max_detections=int(config.get('evaluation',{}).get('max_detections',100)))
-    if client_models or client_bn:
+    try:
+        for view in views:
+            if view not in {'participating','unseen','new-client','hard'}:
+                raise ValueError(f'Unknown evaluation view: {view}')
+            records=manifest.by_split('hard' if view=='hard' else 'test')
+            specified=manifest.metadata.get('views',{})
+            normalized={str(k).lower().replace('_','-'):v for k,v in specified.items()}
+            if view in normalized:
+                allowed=set(map(str,normalized[view]))
+                records=tuple(r for r in manifest.records if r.id in allowed)
+                if len(records)!=len(allowed):
+                    raise ValueError(f'Evaluation view {view} contains unresolved identities')
+            if method=='fedbn' and view!='new-client':
+                from .baselines import batchnorm_state_keys
+                expected_bn=batchnorm_state_keys(model)
+                for record in records:
+                    values=(client_bn or {}).get(str(record.client_id))
+                    if values is None or set(values)!=expected_bn:
+                        raise ValueError('FedBN evaluation requires the complete client BN state')
+            targets={}; predictions={};audit_views[view]=[]
+            path=output_dir/f'{view}.jsonl'
+            if path.exists():
+                raise FileExistsError(path)
+            for record in records:
+                if client_models:
+                    client_key=local_new_client_id if view=='new-client' else str(record.client_id)
+                    client_key=client_key if client_key in client_models else local_new_client_id
+                    if client_key not in client_models:
+                        raise ValueError('Local-only evaluation needs a fixed model for the cold-start view')
+                    model.load_state_dict(client_models[client_key],strict=True)
+                elif client_bn or (method=='fedbn' and view=='new-client'):
+                    # Restore frozen global BN, then apply the client's trained BN state.
+                    sd=model.state_dict()
+                    all_bn={key for values in (client_bn or {}).values() for key in values}
+                    for key in all_bn:
+                        sd[key]=before[key]
+                    if view=='new-client' and method=='fedbn':
+                        sd.update(fedbn_prior['state'])
+                    elif view!='new-client' and str(record.client_id) in client_bn:
+                        sd.update(client_bn[str(record.client_id)])
+                    model.load_state_dict(sd,strict=True)
+                sample=prepared_sample(record,config)
+                if view=='unseen':
+                    sample=apply_unseen(sample,identity=record.id,
+                                        perturbation=config.get('evaluation',{}).get('unseen',{'rgb_brightness':config.get('evaluation',{}).get('unseen_brightness',.65)}),
+                                        seed=int(config['experiment'].get('seed',0)))
+                state=prior if view=='new-client' else states.get(str(record.client_id),prior)
+                assessed=assess_frame(model,router,sample,state,calibration,config,experts=experts)
+                detections=[{'box':c['box'],'class_id':c['class_id'],'score':float(c['score'])} for c in assessed['candidates']]
+                targets[record.id]=sample['targets']; predictions[record.id]=detections
+                audit_views[view].append(evaluation_record(record,sample,config,view,
+                    state_source='calibration_prior' if view=='new-client' else
+                        ('frozen_client_state' if str(record.client_id) in states else 'calibration_prior_fallback')))
+                append_jsonl(path,{'id':record.id,'predictions':detections,'coordinate_system':'letterbox-normalized-xyxy',
+                                  'view':view,'state_frozen':True})
+            results[view]=evaluate_detection(targets,predictions,max_detections=int(config.get('evaluation',{}).get('max_detections',100)))
+        if client_models or client_bn or fedbn_prior is not None:
+            model.load_state_dict(before,strict=True)
+        for key,value in model.state_dict().items():
+            if not torch.equal(value,before[key]):
+                raise RuntimeError(f'Evaluation changed model state: {key}')
+        for key,value in router.state_dict().items():
+            if not torch.equal(value,router_before[key]):
+                raise RuntimeError(f'Evaluation changed router state: {key}')
+        write_json(output_dir/'evaluation_manifest.json',build_evaluation_manifest(model,router,manifest,states,calibration,config,
+            audit_views,client_models=client_models,client_bn=client_bn,local_new_client_id=local_new_client_id,
+            fedbn_prior=fedbn_prior,prediction_dir=output_dir))
+        return results
+
+    finally:
         model.load_state_dict(before,strict=True)
-    for key,value in model.state_dict().items():
-        if not torch.equal(value,before[key]):
-            raise RuntimeError(f'Evaluation changed model state: {key}')
-    for key,value in router.state_dict().items():
-        if not torch.equal(value,router_before[key]):
-            raise RuntimeError(f'Evaluation changed router state: {key}')
-    write_json(output_dir/'evaluation_manifest.json',build_evaluation_manifest(model,router,manifest,states,calibration,config,
-        audit_views,client_models=client_models,client_bn=client_bn,local_new_client_id=local_new_client_id,prediction_dir=output_dir))
-    return results
+        router.load_state_dict(router_before,strict=True)
 
 
-def evaluate_current_models(model,router,manifest,states,calibration,config,output_dir,*,local_models=None,bn_cache=None):
+def evaluate_current_models(model,router,manifest,states,calibration,config,output_dir,*,local_models=None,bn_cache=None,fedbn_prior=None):
     """Evaluate using the matching client model and BN state."""
     method=config['experiment']['method']
     extra={}
@@ -791,8 +822,9 @@ def evaluate_current_models(model,router,manifest,states,calibration,config,outp
         write_json(Path(output_dir)/'local_model_selection.json',{'protocol':'minimum server calibration loss; fixed before evaluation',
                                                                'losses':losses,'selected_client':chosen})
     elif method=='fedbn':
-        metrics=evaluate_model(model,router,manifest,states,calibration,config,Path(output_dir)/'predictions',client_bn=bn_cache)
-        extra={'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache}
+        metrics=evaluate_model(model,router,manifest,states,calibration,config,Path(output_dir)/'predictions',
+                               client_bn=bn_cache,fedbn_prior=fedbn_prior)
+        extra={'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache,'fedbn_prior':fedbn_prior}
     else:
         metrics=evaluate_model(model,router,manifest,states,calibration,config,Path(output_dir)/'predictions')
     write_json(Path(output_dir)/'metrics.json',metrics)
@@ -800,7 +832,7 @@ def evaluate_current_models(model,router,manifest,states,calibration,config,outp
 
 
 def evaluate_remote_models(model,router,manifest,states,calibration,config,output_dir,executor,*,
-                           client_runtime=None,client_models=None,client_bn=None,local_new_client_id=None):
+                           client_runtime=None,client_models=None,client_bn=None,local_new_client_id=None,fedbn_prior=None):
     """Pool authenticated worker predictions under the declared view identities."""
     _check_evaluation_classes(model,manifest,config)
     from .metrics import evaluate_detection
@@ -835,13 +867,18 @@ def evaluate_remote_models(model,router,manifest,states,calibration,config,outpu
         new_client_model=arrays(local_models[chosen])
         extra={'checkpoint_kind':'local_bundle','client_models':local_models,'local_new_client_id':chosen}
     elif method=='fedbn':
-        extra={'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache}
+        from .fedbn import validate_bn_prior
+        validate_bn_prior(model,fedbn_prior)
+        extra={'checkpoint_kind':'fedbn_bundle','client_bn':bn_cache,'fedbn_prior':fedbn_prior}
     for client in clients:
         persistent=deepcopy(runtime.get(client,{}))
         if client in local_models:
             persistent['local_model']=arrays(local_models[client])
         if client in bn_cache:
             persistent['bn']=arrays(bn_cache[client])
+        if method=='fedbn':
+            from .fedbn import bn_prior_to_arrays
+            persistent['fedbn_prior']=bn_prior_to_arrays(fedbn_prior)
         if new_client_model is not None:
             persistent['new_client_model']=new_client_model
         result=executor.execute('evaluate',model,router,calibration,client_id=client,state=states[client],persistent_state=persistent)
@@ -873,7 +910,8 @@ def evaluate_remote_models(model,router,manifest,states,calibration,config,outpu
     write_json(directory/'metrics.json',metrics)
     write_json(directory/'predictions'/'evaluation_manifest.json',build_evaluation_manifest(model,router,manifest,states,calibration,config,
         {view:data['audit_records'] for view,data in grouped.items()},client_models=local_models,
-        client_bn=bn_cache,local_new_client_id=extra.get('local_new_client_id',local_new_client_id),prediction_dir=directory/'predictions'))
+        client_bn=bn_cache,local_new_client_id=extra.get('local_new_client_id',local_new_client_id),
+        fedbn_prior=fedbn_prior,prediction_dir=directory/'predictions'))
     return metrics,extra
 
 
@@ -1054,7 +1092,7 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
     source_states={}; pool=[]; history=[]; previous_state=None;aggregation_state=None
     if replay is not None:
         source_states=replay.source_states;pool=replay.pool
-    local_models={};bn_cache={};client_runtime={}
+    local_models={};bn_cache={};client_runtime={};fedbn_prior=None
     start_round=0
     journal={}
     if restored is not None:
@@ -1066,6 +1104,10 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
         history=restored['history'];previous_state=restored['previous_state']
         aggregation_state=restored.get('aggregation_state')
         local_models=restored['local_models'];bn_cache=restored['bn_cache'];client_runtime=restored.get('client_runtime',{})
+        if method=='fedbn' and not labels_only:
+            from .fedbn import validate_bn_prior
+            fedbn_prior=restored.get('fedbn_prior')
+            validate_bn_prior(model,fedbn_prior,validation_ids=[record.id for record in manifest.by_split('validation')])
         start_round=restored['next_round'];journal=restored['files']
         if len(history)!=start_round or [row['round_index'] for row in history]!=list(range(start_round)):
             raise ValueError('Resume history is not contiguous')
@@ -1080,9 +1122,24 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
     def evaluate_run(directory):
         if executor is None:
             return evaluate_current_models(model,router,manifest,states,calibration,cfg,directory,
-                                           local_models=local_models,bn_cache=bn_cache)
+                                           local_models=local_models,bn_cache=bn_cache,fedbn_prior=fedbn_prior)
         return evaluate_remote_models(model,router,manifest,states,calibration,cfg,directory,executor,
-                                      client_runtime=client_runtime,client_models=local_models,client_bn=bn_cache)
+                                      client_runtime=client_runtime,client_models=local_models,client_bn=bn_cache,
+                                      fedbn_prior=fedbn_prior)
+    if restored is None and not labels_only and method=='fedbn':
+        from .client import build_client_validation_bn_prior
+        from .fedbn import bn_prior_from_arrays,merge_validation_bn_priors,validate_bn_prior
+        from .evaluation_manifest import identity_sha256
+        contributions=[bn_prior_from_arrays(client_task('fedbn_prior',client)['fedbn_prior']) for client in clients]
+        remaining=sorted({str(record.client_id) for record in manifest.by_split('validation')}-set(clients))
+        for client in remaining:
+            contributions.append(bn_prior_from_arrays(build_client_validation_bn_prior(model,manifest,cfg,client_id=client)['fedbn_prior']))
+        bound={'initial_model_sha256':identity_sha256(model.state_dict()),
+               'preprocessing_sha256':identity_sha256({'task':cfg.get('task'),'model':{
+                   key:cfg.get('model',{}).get(key) for key in ['image_size','depth_scale','disable_auxiliary','detector_rgb_only']}})}
+        fedbn_prior=merge_validation_bn_priors(model,contributions,binding=bound)
+        validate_bn_prior(model,fedbn_prior,validation_ids=[record.id for record in manifest.by_split('validation')])
+        write_json(out/'fedbn_validation_prior.json',fedbn_prior['protocol'])
     if restored is None and not labels_only:
         # Initialize state from validation data with frozen initial weights.
         for client in clients:
@@ -1097,7 +1154,7 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
             'model':model.state_dict(),'router':router.state_dict(),'states':states,'source_states':source_states,
             'pool':pool,'history':history,'previous_state':previous_state,'aggregation_state':aggregation_state,
             'local_models':local_models,
-            'bn_cache':bn_cache,'client_runtime':client_runtime,
+            'bn_cache':bn_cache,'client_runtime':client_runtime,'fedbn_prior':fedbn_prior,
             'rng':capture_rng_state(),'files':journal,'metrics':metrics or {},
             'replay':replay.state_dict() if replay is not None else None})
         write_json(out/'status.json',{'status':'completed' if phase=='completed' else 'running',
@@ -1245,7 +1302,7 @@ def run_experiment(config,seed=0,output_dir=None,labels_only=False,resume=None):
         if t+1 in cfg['experiment'].get('save_rounds',[]):
             checkpoint_path=out/'checkpoints'/f'round_{t+1:06d}.pt'
             save_checkpoint(checkpoint_path,model,router,cfg,states,pool,t)
-            extra=_saved_checkpoint_bundle(model,manifest,cfg,local_models,bn_cache,remote=remote_mode)
+            extra=_saved_checkpoint_bundle(model,manifest,cfg,local_models,bn_cache,remote=remote_mode,fedbn_prior=fedbn_prior)
             if extra:
                 payload=torch.load(checkpoint_path,map_location='cpu',weights_only=True)
                 payload.update(extra)

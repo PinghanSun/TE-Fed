@@ -2,12 +2,14 @@
 from copy import deepcopy
 import math
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
 try:
     import torch
     import torch.nn.functional as F
+    import tefed.proxyfl as proxyfl
     from tefed.model import RoutedYOLO
     from tefed.proxyfl import class_proxy_parameters, optimize_global_proxies, pool_contrastive_loss, proxy_objective
     AVAILABLE = True
@@ -47,14 +49,29 @@ class PoolObjectiveTests(unittest.TestCase):
         loss.backward()
         self.assertEqual(float(features.grad.abs().sum()), 0.)
 
-    def test_empty_possible_set_cannot_use_its_own_diagonal(self):
+    def test_empty_possible_set_is_not_an_anchor(self):
         features = torch.tensor([[1., 0]], requires_grad=True)
         loss, details = pool_contrastive_loss(features, features * 0,
             torch.zeros(1, 2, dtype=torch.bool), torch.tensor([True]), return_details=True)
         self.assertEqual(float(loss.detach()), 0.)
+        self.assertEqual(details['anchor_count'], 0)
         self.assertEqual(details['negative_pair_count'], 0)
         loss.backward()
         self.assertTrue(torch.isfinite(features.grad).all())
+
+    def test_empty_possible_set_is_omitted_from_anchors_and_negatives(self):
+        features = torch.tensor([[1., 0], [.5, math.sqrt(.75)], [1., 0]], requires_grad=True)
+        targets = torch.tensor([[1., 0], [0., 0], [0., 0]], requires_grad=True)
+        pools = torch.tensor([[1, 0], [0, 1], [0, 0]], dtype=torch.bool)
+        loss, details = pool_contrastive_loss(features, targets, pools,
+            torch.tensor([True, False, True]), return_details=True)
+        self.assertAlmostEqual(float(loss.detach()), math.log1p(math.exp(.5 - 1.)), places=6)
+        self.assertEqual(details, {'anchor_count': 1, 'negative_pair_count': 1})
+        loss.backward()
+        # The labeled row still provides the negative; the empty row has no role.
+        self.assertGreater(float(features.grad[1].abs().sum()), 0.)
+        self.assertEqual(float(features.grad[2].abs().sum()), 0.)
+        self.assertEqual(float(targets.grad[2].abs().sum()), 0.)
 
 
 @unittest.skipUnless(AVAILABLE, 'Requires native training dependencies')
@@ -133,6 +150,7 @@ class NativeProxyFLTests(unittest.TestCase):
         self.assertEqual(stats['labeled_count'], 1)
         self.assertEqual(stats['high_count'], 1)
         self.assertEqual(stats['low_count'], 1)
+        self.assertEqual(stats['omitted_empty_count'], 0)
         self.assertEqual(stats['proposal_count'], 2)
         self.assertEqual(stats['anchor_count'], 4)
         self.assertEqual(stats['class_counts'], [1, 1])
@@ -161,6 +179,70 @@ class NativeProxyFLTests(unittest.TestCase):
         self.assertEqual(stats['high_count'], 1)
         self.assertEqual(stats['class_counts'], [1, 0])
         self.assertEqual(stats['anchor_count'], 2)
+
+    def test_adding_empty_low_pool_changes_neither_icpl_nor_labeled_negatives(self):
+        labeled = self.sample('labeled', [{'class_id': 1, 'box': [.1, .1, .5, .5]}])
+        candidates = [{'index': 0, 'posterior': [.99, .01], 'score': .9},
+                      {'index': 1, 'posterior': [.6, .4], 'score': .8}]
+        original_forward = proxyfl._class_feature_forward
+        def uniform_local(*args):
+            features, logits = original_forward(*args)
+            return features, torch.zeros_like(logits)
+        results = []
+        with patch.object(proxyfl, '_class_feature_forward', side_effect=uniform_local):
+            for extra in ([], [{'index': 2, 'posterior': [.5, .5], 'score': .7}]):
+                model = deepcopy(self.model)
+                batch = [{'kind': 'labeled', 'sample': labeled},
+                         {'kind': 'pseudo', 'sample': self.sample('unlabeled', []),
+                          'proxy_candidates': candidates + extra}]
+                loss, stats = proxy_objective(model, batch, {'model': {}}, [.5, .5],
+                    strong_view=self.strong, round_id=0, epoch=0)
+                loss.backward()
+                gradients = {name: None if p.grad is None else p.grad.clone()
+                             for name, p in model.named_parameters()}
+                results.append((loss.detach(), stats, gradients))
+        baseline, augmented = results
+        torch.testing.assert_close(baseline[0], augmented[0], rtol=0, atol=0)
+        for field in ('labeled_count', 'high_count', 'low_count', 'anchor_count',
+                      'negative_pair_count', 'class_counts'):
+            self.assertEqual(baseline[1][field], augmented[1][field], field)
+        self.assertGreater(augmented[1]['negative_pair_count'], 0)
+        self.assertEqual(augmented[1]['anchor_count'], 4)
+        self.assertEqual(augmented[1]['proposal_count'], 3)
+        self.assertEqual(augmented[1]['omitted_empty_count'], 1)
+        for name, gradient in baseline[2].items():
+            if gradient is None:
+                self.assertIsNone(augmented[2][name], name)
+            else:
+                torch.testing.assert_close(gradient, augmented[2][name], rtol=0, atol=0)
+
+    def test_all_empty_low_pools_are_omitted_but_high_confidence_stays_singleton(self):
+        model = deepcopy(self.model)
+        original_forward = proxyfl._class_feature_forward
+        def uniform_local(*args):
+            features, logits = original_forward(*args)
+            return features, torch.zeros_like(logits)
+        item = {'kind': 'pseudo', 'sample': self.sample('unlabeled', []),
+                'proxy_candidates': [{'index': 0, 'posterior': [.5, .5], 'score': .7}]}
+        with patch.object(proxyfl, '_class_feature_forward', side_effect=uniform_local):
+            loss, stats = proxy_objective(model, [item], {'model': {}}, [.5, .5],
+                strong_view=self.strong, round_id=0, epoch=0)
+        self.assertEqual(float(loss.detach()), 0.)
+        self.assertEqual(stats['omitted_empty_count'], 1)
+        self.assertEqual(stats['low_count'], 0)
+        self.assertEqual(stats['anchor_count'], 0)
+        self.assertEqual(stats['negative_pair_count'], 0)
+        self.assertEqual(stats['class_counts'], [0, 0])
+        loss.backward()
+        self.assertTrue(all(p.grad is None or not p.grad.any() for p in model.parameters()))
+        _, high = proxy_objective(deepcopy(self.model), [item],
+            {'model': {}, 'baselines': {'proxyfl': {'pseudo_threshold': .4}}}, [.5, .5],
+            strong_view=self.strong, round_id=0, epoch=0)
+        self.assertEqual(high['high_count'], 1)
+        self.assertEqual(high['low_count'], 0)
+        self.assertEqual(high['omitted_empty_count'], 0)
+        self.assertEqual(high['anchor_count'], 2)
+        self.assertEqual(high['class_counts'], [1, 0])
 
     def test_labeled_only_prior_counts_do_not_require_unlabeled_anchors(self):
         item = {'kind': 'labeled', 'sample': self.sample('labeled', [{'class_id': 1, 'box': [.1, .1, .5, .5]}])}
